@@ -541,6 +541,7 @@ class ComfyG_Veo:
                 rejected_key = None
                 if "seed" in err_msg and "not supported" in err_msg: rejected_key = "seed"
                 elif "fps" in err_msg and "not supported" in err_msg: rejected_key = "fps"
+                elif "resolution" in err_msg and "not supported" in err_msg: rejected_key = "resolution"
                 elif "person_generation" in err_msg: rejected_key = "person_generation"
                 elif "enhance_prompt" in err_msg or "enhancePrompt" in err_msg: rejected_key = "enhance_prompt"
                 elif "generate_audio" in err_msg: rejected_key = "generate_audio"

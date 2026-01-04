@@ -1,12 +1,3 @@
-google-genai
-google-generativeai>=0.8.0
-loguru
-accelerate
-requests
-pillow
 numpy
-torch
-torchaudio
-soundfile
-imageio
-imageio[ffmpeg]
+scipy
+scikit-image

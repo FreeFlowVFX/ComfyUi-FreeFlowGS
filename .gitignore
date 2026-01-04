@@ -1,13 +1,41 @@
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.DS_Store
-._*
-.env
-.venv
+*.pyc
+*.pyo
+*.pyd
+.Python
 env/
 venv/
+.env
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDES
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project Specific
+debug_*.py
+backup/
 backups/
-debug/
+Implementation_Plans/
+temp_*/
+*.ply
+*.tar.xz
+*.zip
+*.7z
+bin/
+brush-*
+.gemini/
 config.json
+logs/
+output/

@@ -1,27 +1,115 @@
-import importlib.util
-import subprocess
-import sys
+import traceback
 import os
+from aiohttp import web
+from server import PromptServer
 
-def check_and_install_requirements():
+# --- Custom Server Routes for External File Serving ---
+routes = PromptServer.instance.routes
+
+@routes.get("/freeflow/view")
+async def freeflow_view_image(request):
+    if "filename" not in request.rel_url.query:
+        print("DEBUG: /freeflow/view - No filename param")
+        return web.Response(status=404)
+    
+    filename = request.rel_url.query["filename"]
+    if not os.path.exists(filename):
+        print(f"DEBUG: /freeflow/view - File not found: {filename}")
+        return web.Response(status=404)
+
+    # Security: We might want to restrict this, but for this dev tool, 
+    # we allow reading the provided absolute path.
+    # Serve the file content
+    # print(f"DEBUG: Serving {filename}") # Verbose, maybe comment out if too spammy
+    with open(filename, "rb") as f:
+        data = f.read()
+    
+    # Determine basic content type
+    ctype = "application/octet-stream"
+    if filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
+        ctype = "image/jpeg"
+    elif filename.lower().endswith(".png"):
+        ctype = "image/png"
+    elif filename.lower().endswith(".webp"):
+        ctype = "image/webp"
+
+    return web.Response(body=data, content_type=ctype)
+
+
+try:
+    from .utils import FreeFlowUtils
+    
+    # --- OS & Dependency Checks ---
+    print("\n" + "="*50)
+    print("🌊 Initializing FreeFlow 4D (Cinema Splats)")
+    print(f"   • OS Detected: {FreeFlowUtils.get_os()}")
+    
+    # STARTUP VERSION CHECK (Threaded)
+    FreeFlowUtils.check_updates()
+
+    # AUTO-INSTALL CHECK
     try:
-        # Check for critical dependencies
-        import google.genai
-        import loguru
-    except ImportError:
-        print("ComfyUI-TimNodes: Dependencies missing. Installing from requirements.txt...")
-        req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
-        if os.path.exists(req_path):
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
-                print("ComfyUI-TimNodes: Dependencies installed. Restarting ComfyUI might be required if it still fails.")
-            except Exception as e:
-                print(f"ComfyUI-TimNodes: Failed to auto-install requirements: {e}")
+        FreeFlowUtils.check_and_install()
+    except Exception as e:
+        FreeFlowUtils.log(f"Auto-Install Failed: {e}", "ERROR")
+        traceback.print_exc()
 
-check_and_install_requirements()
+    brush_path = FreeFlowUtils.get_binary_path("brush")
+    colmap_path = FreeFlowUtils.get_binary_path("colmap")
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    if not brush_path:
+        FreeFlowUtils.log("Brush binary MISSING after auto-install attempt.", "ERROR")
+    else:
+        FreeFlowUtils.ensure_executable(brush_path)
+        print(f"   • Brush: Found ({brush_path.name})")
 
-WEB_DIRECTORY = "js"
+    if not colmap_path:
+        FreeFlowUtils.log("COLMAP NOT FOUND.", "WARN")
+        if FreeFlowUtils.get_os() == "Darwin":
+            print("   >>> ACTION: Run 'brew install colmap' in Terminal (Auto-install not supported on Mac due to dylib dependencies)")
+    else:
+        print(f"   • COLMAP: Found ({colmap_path.name})")
 
+    print("="*50 + "\n")
+
+    # --- Node Imports ---
+    from .nodes.FreeFlow_MultiCamLoader import FreeFlow_MultiCamLoader
+    from .nodes.FreeFlow_SmartGridMonitor import FreeFlow_SmartGridMonitor
+    from .nodes.FreeFlow_ColmapAnchor import FreeFlow_ColmapAnchor
+    from .nodes.FreeFlow_ColmapVisualizer import FreeFlow_ColmapVisualizer
+    from .nodes.FreeFlow_AdaptiveEngine import FreeFlow_AdaptiveEngine
+    from .nodes.FreeFlow_AdaptiveEngine import FreeFlow_AdaptiveEngine
+    from .nodes.FreeFlow_InteractivePlayer import FreeFlow_InteractivePlayer
+    from .nodes.FreeFlow_PLYSequenceLoader import FreeFlow_PLYSequenceLoader
+    from .nodes.FreeFlow_PostProcessSmoother import FreeFlow_PostProcessSmoother
+
+    NODE_CLASS_MAPPINGS = {
+        "FreeFlow_MultiCamLoader": FreeFlow_MultiCamLoader,
+        "FreeFlow_SmartGridMonitor": FreeFlow_SmartGridMonitor,
+        "FreeFlow_ColmapAnchor": FreeFlow_ColmapAnchor,
+        "FreeFlow_ColmapVisualizer": FreeFlow_ColmapVisualizer,
+        "FreeFlow_AdaptiveEngine": FreeFlow_AdaptiveEngine,
+        "FreeFlow_InteractivePlayer": FreeFlow_InteractivePlayer,
+        "FreeFlow_PLYSequenceLoader": FreeFlow_PLYSequenceLoader,
+        "FreeFlow_PostProcessSmoother": FreeFlow_PostProcessSmoother
+    }
+
+    NODE_DISPLAY_NAME_MAPPINGS = {
+        "FreeFlow_MultiCamLoader": "FreeFlow Multi-Camera Loader",
+        "FreeFlow_SmartGridMonitor": "FreeFlow Smart Grid Monitor",
+        "FreeFlow_ColmapAnchor": "FreeFlow COLMAP Anchor",
+        "FreeFlow_ColmapVisualizer": "FreeFlow COLMAP 3D Visualizer",
+        "FreeFlow_AdaptiveEngine": "FreeFlow 4D Adaptive Engine",
+        "FreeFlow_InteractivePlayer": "FreeFlow 4D Player",
+        "FreeFlow_PLYSequenceLoader": "FreeFlow PLY Sequence Loader",
+        "FreeFlow_PostProcessSmoother": "FreeFlow Post-Process Smoother (Savitzky-Golay)"
+    }
+
+except Exception as e:
+    print("\n\033[91m🌊 FreeFlowGS IMPORT FAILED:\033[0m")
+    traceback.print_exc()
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+
+WEB_DIRECTORY = "./js"
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
