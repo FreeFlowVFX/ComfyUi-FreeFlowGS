@@ -1,0 +1,18 @@
+from .google_nodes import NODE_CLASS_MAPPINGS as GOOGLE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as GOOGLE_DISPLAY_NAME_MAPPINGS
+
+VHS_CLASS_MAPPINGS = {}
+VHS_DISPLAY_NAME_MAPPINGS = {}
+
+try:
+    from .vhs_nodes import NODE_CLASS_MAPPINGS as V_MAP, NODE_DISPLAY_NAME_MAPPINGS as V_DISPLAY
+    VHS_CLASS_MAPPINGS = V_MAP
+    VHS_DISPLAY_NAME_MAPPINGS = V_DISPLAY
+except ImportError:
+    print("TimNodes Warning: Failed to import Video Helper Suite integration nodes. (Dependency missing?)")
+except Exception as e:
+    print(f"TimNodes Warning: Error importing VHS nodes: {e}")
+
+NODE_CLASS_MAPPINGS = {**GOOGLE_CLASS_MAPPINGS, **VHS_CLASS_MAPPINGS}
+NODE_DISPLAY_NAME_MAPPINGS = {**GOOGLE_DISPLAY_NAME_MAPPINGS, **VHS_DISPLAY_NAME_MAPPINGS}
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
