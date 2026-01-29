@@ -88,4 +88,4 @@ Web-based 3D player with depth sorting and camera controls to view the resulting
 - **Missing Binaries**: Check the ComfyUI console logs. You may need to install `colmap` or `ffmpeg` manually if auto-install fails.
 
 ## License
-MIT License
+GNU General Public License v3.0
