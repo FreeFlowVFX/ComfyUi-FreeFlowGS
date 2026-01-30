@@ -1,4 +1,4 @@
-# ComfyUI-FreeFlowGS: Cinema-Grade 4D Gaussian Splatting
+# ComfyUI-FreeFlowGS: 4D Gaussian Splatting
 
 **High-Fidelity 4D Gaussian Splatting Suite for ComfyUI**
 
