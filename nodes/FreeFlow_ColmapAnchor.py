@@ -252,6 +252,8 @@ class FreeFlow_ColmapAnchor:
                      raise RuntimeError("Failed to download Vocabulary Tree file.")
              cmd.extend(["--VocabTreeMatching.vocab_tree_path", str(vocab_path)])
 
+        return cmd
+
     def _build_mapper_cmd(self, colmap_bin, database_path, images_dir, sparse_dir, params):
         """Build mapper command with advanced settings."""
         cmd = [
