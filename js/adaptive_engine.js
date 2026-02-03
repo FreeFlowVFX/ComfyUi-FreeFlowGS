@@ -14,7 +14,8 @@ app.registerExtension({
 
                 const vizWidget = findWidget("visualize_training");
                 const intervalWidget = findWidget("preview_interval");
-                const filterWidget = findWidget("preview_camera_filter"); // Newly added
+                const filterWidget = findWidget("preview_camera_filter");
+                const evalCameraWidget = findWidget("eval_camera_index"); // Camera index selector
                 const topoWidget = findWidget("topology_mode");
                 const smoothWidget = findWidget("apply_smoothing");
 
@@ -49,6 +50,7 @@ app.registerExtension({
 
                     toggleWidget(intervalWidget, showPreviewControls);
                     toggleWidget(filterWidget, showPreviewControls);
+                    toggleWidget(evalCameraWidget, showPreviewControls);
                     toggleWidget(smoothWidget, showSmoothing);
 
                     this.setSize([this.size[0], this.computeSize([this.size[0], this.size[1]])[1]]);

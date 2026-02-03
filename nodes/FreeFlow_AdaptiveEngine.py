@@ -32,6 +32,8 @@ class FreeFlow_AdaptiveEngine:
     
     def __init__(self):
         self._last_error = None
+        self._cached_seconds_per_step = None  # Adaptive: Measured on first frame
+        self._preview_step_counter = {}  # File-based progress: {frame_name: current_step}
 
     @classmethod
     def INPUT_TYPES(s):
@@ -46,6 +48,7 @@ class FreeFlow_AdaptiveEngine:
 
                 "preview_interval": ("INT", {"default": 500, "min": 100, "max": 5000, "tooltip": "Step interval for previews/updates."}),
                 "preview_camera_filter": ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. cam01 (Empty = Show All/Latest)", "tooltip": "Filter preview to specific camera name."}),
+                "eval_camera_index": ("INT", {"default": 10, "min": 1, "max": 100, "tooltip": "[Preview Mode Only] Render every Nth camera for preview. E.g. if you have 16 cameras: 1 = all cameras, 8 = cam0 + cam8, 15 = cam0 + cam15."}),
 
                 # --- 3. Topology Control (Critical) ---
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Fixed Mode prevents adding/removing points after Frame 0. Eliminate flickering for smooth video."}),
@@ -346,8 +349,8 @@ class FreeFlow_AdaptiveEngine:
         return active_cams
 
     def adapt_flow(self, multicam_feed, colmap_anchor, splat_count, sh_degree,
-                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False, # Added param
-                   visualize_training="Off", preview_interval=500,
+                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False,
+                   visualize_training="Off", preview_interval=500, eval_camera_index=10,
                    iterations=10000, learning_rate=0.0005, densification_interval=300,
                    opacity_reset_interval=5000, densify_grad_threshold=0.0002, use_symlinks=True,
                    frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3, 
@@ -467,16 +470,9 @@ class FreeFlow_AdaptiveEngine:
                     "--eval-every", str(preview_interval),
                     "--eval-save-to-disk"
                 ])
-                # We need to ensure we have evaluation views. 
-                # Be default Brush might not split dataset.
-                # Let's force a split? Or assume generic behavior.
-                # Adding --eval-split-every 8 ensures 1/8th of images are used for eval (and thus rendered).
-                # This might reduce training data slightly (12.5%).
-                # User wants PREVIEW, not rigorous eval.
-                # If we don't set split, does eval work? Maybe.
-                # Safer: Force a split to ensure renderings happen.
-                cmd.extend(["--eval-split-every", "10"]) 
-                print(f"   📸 Saving Preview Image every {preview_interval} steps...")
+                # Use user-defined eval camera index to control which cameras are rendered
+                cmd.extend(["--eval-split-every", str(eval_camera_index)]) 
+                print(f"   📸 Saving Preview Image every {preview_interval} steps (rendering camera index {eval_camera_index})...")
 
             # --- FIXED TOPOLOGY LOGIC ---
             is_fixed_topology = "Fixed" in topology_mode
@@ -514,14 +510,25 @@ class FreeFlow_AdaptiveEngine:
             )
             
             # Simulated Progress Bar (Time-based estimate)
-            # We don't know real steps if Brush is silent, so we estimate.
+            # Use ADAPTIVE speed: cached from previous frame, or default for first frame
             
-            # Estimate training time and show progress
-            # Tuned to ~0.035s per step (M-series Mac average)
-            seconds_per_step = 0.035 
+            if self._cached_seconds_per_step is not None:
+                seconds_per_step = self._cached_seconds_per_step
+                print(f"   ⏱️ Using calibrated speed: {seconds_per_step:.4f}s/step")
+            else:
+                # Default estimate (will be recalibrated)
+                seconds_per_step = 0.035  # Conservative default
+                print(f"   ⏱️ First frame - calibrating speed...")
+            
             est_time = iterations * seconds_per_step
             
-            pbar_thread = threading.Thread(target=self._pbar_simulator, args=(pbar, iterations, seconds_per_step, current_step_global, process))
+            # Pass reference to self so simulator can update cached speed
+            # Also pass visualization mode for file-based progress
+            frame_name = f"{filename_prefix}_frame_{i:04d}"
+            pbar_thread = threading.Thread(
+                target=self._pbar_simulator, 
+                args=(pbar, iterations, seconds_per_step, current_step_global, process, idx == 0, visualize_training, frame_name)
+            )
             pbar_thread.daemon = True
             pbar_thread.start()
 
@@ -545,7 +552,9 @@ class FreeFlow_AdaptiveEngine:
 
             # --- PREVIEW MONITOR (Threaded) ---
             if visualize_training == "Save Preview Images" and unique_id:
-                frame_name = f"{filename_prefix}_frame_{i:04d}"
+                # Initialize step counter for this frame
+                self._preview_step_counter[frame_name] = 0
+                
                 monitor_thread = threading.Thread(
                     target=self._monitor_previews_task,
                     args=(process, output_dir, unique_id, preview_camera_filter, frame_name)
@@ -569,7 +578,13 @@ class FreeFlow_AdaptiveEngine:
                 
                 # Double check return code
                 if process.returncode != 0:
-                     raise RuntimeError(f"Brush process failed with return code {process.returncode}")
+                     # Ignore error IF: 
+                     # 1. We Auto-Killed it (GUI Mode) AND Output exists
+                     # 2. Return code is SIGTERM (-15) or 1 (some windows kills)
+                     if visualize_training == "Spawn Native GUI" and ply_out.exists():
+                         pass # Considered Success
+                     else:
+                        raise RuntimeError(f"Brush process failed with return code {process.returncode}")
 
             except KeyboardInterrupt:
                 process.terminate()
@@ -999,6 +1014,18 @@ class FreeFlow_AdaptiveEngine:
                         # 2. Identify Camera (filename)
                         parent_name = cand.parent.name # eval_500
                         
+                        # --- EXTRACT STEP NUMBER for progress tracking ---
+                        import re
+                        step_match = re.search(r'eval_(\d+)', parent_name)
+                        if step_match:
+                            step_num = int(step_match.group(1))
+                            # Update progress counter (keep highest step seen)
+                            if frame_name in self._preview_step_counter:
+                                if step_num > self._preview_step_counter[frame_name]:
+                                    self._preview_step_counter[frame_name] = step_num
+                            else:
+                                self._preview_step_counter[frame_name] = step_num
+                        
                         # Construct new name: step_500_cam01.png
                         new_name = f"{parent_name}_{cand.name}"
                         dest = previews_dir / new_name
@@ -1033,45 +1060,78 @@ class FreeFlow_AdaptiveEngine:
                         try:
                             cand.parent.rmdir() 
                         except:
-                            pass 
+                             pass 
                             
                     except Exception as e:
                         print(f"   [Preview Error] Processing {cand}: {e}")
 
-    def _pbar_simulator(self, pbar, iterations, seconds_per_step, start_step, process):
-        """Helper to simulate progress since Brush doesn't give stdout progress easily."""
+    def _pbar_simulator(self, pbar, iterations, seconds_per_step, start_step, process, is_first_frame=False, visualize_training="Off", frame_name=""):
+        """
+        Helper to simulate progress since Brush doesn't give stdout progress easily.
+        On first frame, performs calibration to measure actual GPU speed.
+        In "Save Preview Images" mode, uses file-based progress from preview image count.
+        """
         start_time = time.time()
         last_pct = 0
+        calibration_done = False
+        calibration_sample_time = 30  # Seconds to sample for calibration
+        use_file_based_progress = (visualize_training == "Save Preview Images")
         
         # Initial estimate print
-        est_total = iterations * seconds_per_step
-        print(f"   ⏱️ Estimated training time: ~{est_total:.0f}s for {iterations} steps")
+        if use_file_based_progress:
+            print(f"   📊 Using file-based progress (tracking preview images)...")
+        else:
+            est_total = iterations * seconds_per_step
+            print(f"   ⏱️ Estimated training time: ~{est_total:.0f}s for {iterations} steps")
 
-        # Loop until process finishes or we hit iteration count (though we prefer matching process state)
+        # Loop until process finishes
         while process.poll() is None:
             elapsed = time.time() - start_time
             
-            # Calculate estimated current step based on elapsed time vs expected speed
-            # We clamp it to iterations to avoid confusion
-            estimated_step = min(int(elapsed / seconds_per_step), iterations)
+            # --- PROGRESS CALCULATION ---
+            if use_file_based_progress and frame_name:
+                # Use REAL step count from preview file watcher
+                actual_step = self._preview_step_counter.get(frame_name, 0)
+                estimated_step = actual_step
+            else:
+                # --- CALIBRATION PHASE (First frame only) ---
+                if is_first_frame and not calibration_done and elapsed >= calibration_sample_time:
+                    calibration_done = True
+                
+                # Calculate estimated current step based on elapsed time
+                estimated_step = min(int(elapsed / seconds_per_step), iterations)
             
             pct = (estimated_step / iterations) * 100
             
             # Logging update every 10%
             if pct - last_pct >= 10:
-                print(f"   └─ 🔄 ~Step {estimated_step}/{iterations} ({pct:.0f}%) [elapsed: {elapsed:.0f}s]")
+                print(f"   └─ 🔄 Step {estimated_step}/{iterations} ({pct:.0f}%) [elapsed: {elapsed:.0f}s]")
                 last_pct = pct
                 
                 # Sync ComfyUI ProgressBar
                 if pbar: 
-                    # Calculate how much to add to pbar
-                    pass
+                    pass  # Already updating via pbar.update below
 
             # Regular update loop
-            time.sleep(seconds_per_step)
+            time.sleep(1)  # Check every second
             if pbar:
                 pbar.update(1)
-            time.sleep(1)
+        
+        # --- POST-TRAINING: Calculate ACTUAL speed for calibration ---
+        total_elapsed = time.time() - start_time
+        
+        if is_first_frame and total_elapsed > 5:  # Only calibrate if ran for reasonable time
+            actual_seconds_per_step = total_elapsed / iterations
+            self._cached_seconds_per_step = actual_seconds_per_step
+            print(f"   📊 Calibrated: {actual_seconds_per_step:.4f}s/step (Total: {total_elapsed:.1f}s for {iterations} steps)")
+        elif total_elapsed > 5:
+            # Update calibration on subsequent frames too (rolling average)
+            new_rate = total_elapsed / iterations
+            if self._cached_seconds_per_step:
+                # Weighted average: 70% old, 30% new (smooth out variance)
+                self._cached_seconds_per_step = 0.7 * self._cached_seconds_per_step + 0.3 * new_rate
+            else:
+                self._cached_seconds_per_step = new_rate
 
 
 
