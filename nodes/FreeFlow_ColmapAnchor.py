@@ -59,9 +59,10 @@ class FreeFlow_ColmapAnchor:
             },
             "optional": {
                 # --- Frame Selection ---
-                # Flexible string input: "0" (default), "0-10", "1,5,10", "all"
-                "frame_selection": ("STRING", {"default": "0", "multiline": False, "tooltip": "Frames to use for anchor. Usually '0' (first frame) is enough. 'all' for full SfM (slow)."}),
+                # Flexible string input: "0" (default), "0-10", "1,5,10", "all", "*"
+                "frame_selection": ("STRING", {"default": "0", "multiline": False, "tooltip": "Frames to use for anchor. Usually '0'. Use 'all' or '*' for full SfM."}),
                  # --- Persistent Storage ---
+                "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Optional: Absolute path for Colmap data (e.g. X:/MyProject/Colmap)"}),
                 "override_existing": ("BOOLEAN", {"default": False, "label": "Override Existing COLMAP", "tooltip": "If True, deletes previous reconstruction and runs again."}),
                 
                 # --- SIFT Extraction Options ---
@@ -138,45 +139,87 @@ class FreeFlow_ColmapAnchor:
             self._last_error = str(e)
             raise
 
-    def _parse_frames(self, frame_str, max_frames):
-        """Parse string for frame indices (e.g. '0', '0-10', '1,5,10', 'all')."""
-        frame_str = str(frame_str).lower().strip()
+    def _extract_frame_numbers(self, multicam_feed):
+        """
+        Extract numeric frame IDs from the camera with the most frames.
+        Returns a list of ints.
+        """
+        if not multicam_feed:
+            return []
+            
+        best_cam = max(multicam_feed, key=lambda k: len(multicam_feed[k]))
+        file_paths = multicam_feed[best_cam]
         
-        if frame_str == "all":
-            return list(range(max_frames))
+        frame_nums = []
+        import re
+        
+        for fp in file_paths:
+            fname = Path(fp).stem
+            # Find all digit sequences
+            matches = re.findall(r'\d+', fname)
+            if matches:
+                # Use the LAST sequence of digits as the frame number
+                frame_nums.append(int(matches[-1]))
+            else:
+                # Fallback: Sequential index if no digits found
+                frame_nums.append(len(frame_nums))
+                
+        return frame_nums
+        
+
+
+    def _parse_frames(self, frame_str, available_frames):
+        """
+        Parse string for frame INDICES based on real frame NUMBERS.
+        """
+        frame_str = str(frame_str).lower().strip()
+        max_idx = len(available_frames)
+        
+        if frame_str == "all" or frame_str == "*":
+            return list(range(max_idx))
             
         indices = set()
         parts = frame_str.split(',')
+        
+        # Step 1: Parse request into list of desired integers
+        desired_frames = set()
+        ranges = []
         
         for part in parts:
             part = part.strip()
             if not part: continue
             
             if '-' in part:
-                # Range: "start-end"
-                try:
-                    start, end = map(int, part.split('-'))
-                    # Inclusive range
-                    for i in range(start, end + 1):
-                        if 0 <= i < max_frames:
-                            indices.add(i)
-                except ValueError:
-                    FreeFlowUtils.log(f"Invalid frame range format: {part}", "WARN")
+                 try:
+                    s, e = map(int, part.split('-'))
+                    ranges.append((s, e))
+                 except: 
+                    FreeFlowUtils.log(f"Invalid range: {part}", "WARN")
             else:
-                # Single index
-                try:
-                    i = int(part)
-                    if 0 <= i < max_frames:
-                        indices.add(i)
-                except ValueError:
-                    FreeFlowUtils.log(f"Invalid frame index: {part}", "WARN")
-                    
-        sorted_indices = sorted(list(indices))
-        if not sorted_indices:
-            FreeFlowUtils.log("No valid frames selected. Defaulting to Frame 0.", "WARN")
-            return [0]
+                 try:
+                    desired_frames.add(int(part))
+                 except: pass
+                 
+        # Step 2: Find indices where frame_num matches
+        final_indices = []
+        for idx, frame_num in enumerate(available_frames):
+            match = False
+            if frame_num in desired_frames:
+                match = True
+            else:
+                for (s, e) in ranges:
+                    if s <= frame_num <= e:
+                        match = True
+                        break
             
-        return sorted_indices
+            if match:
+                final_indices.append(idx)
+                
+        if not final_indices:
+             FreeFlowUtils.log(f"Warning: No frames matched selection '{frame_str}'. Defaulting to first frame.", "WARN")
+             return [0]
+             
+        return sorted(final_indices)
 
     def _build_extraction_cmd(self, colmap_bin, database_path, images_dir, params):
         """Build feature extraction command with all user parameters."""
@@ -278,7 +321,7 @@ class FreeFlow_ColmapAnchor:
         return cmd
 
     def run_colmap(self, multicam_feed, quality="High", camera_model="OPENCV",
-                   frame_selection="0", override_existing=False,
+                   frame_selection="0", override_existing=False, custom_output_path="",
                    sift_estimate_affine_shape=False, sift_domain_size_pooling=False,
                    sift_use_gpu=True, matching_method="Exhaustive", sift_guided_matching=False,
                    mapper_ba_tolerance=1e-5, mapper_min_num_matches=15,
@@ -305,28 +348,34 @@ class FreeFlow_ColmapAnchor:
         FreeFlowUtils.log(f"Quality: {quality} | Frames: {frame_selection}")
         FreeFlowUtils.log("=" * 50)
         
-        # 1. Determine Output Directory (Parent of input)
+        # 1. Determine Output Directory
         cameras = list(multicam_feed.keys())
         if not cameras: 
              raise ValueError("Multicam feed is empty!")
-             
-        # Get path of first image from first camera to find parent
-        first_cam_files = multicam_feed[cameras[0]]
-        if not first_cam_files:
-            raise ValueError(f"Camera {cameras[0]} has no images!")
-            
-        first_image_path = Path(first_cam_files[0]) # e.g. .../Capture/cam01/0000.jpg
-        
+
         # Logic: 
         # If structure is .../Capture/cam01/img.jpg and key is cam01 -> Parent is .../Capture
-        parent_dir = first_image_path.parent
-        if parent_dir.name == cameras[0]:
-             parent_dir = parent_dir.parent
-             
-        FreeFlowUtils.log(f"Detected Project Parent Directory: {parent_dir}")
+        # We need parent dir only if default path is used
         
+        if custom_output_path and custom_output_path.strip():
+             workspace = Path(custom_output_path.strip())
+             FreeFlowUtils.log(f"Using Custom Output Path: {workspace}")
+        else:
+            # Default: Parent of input
+            # Get path of first image from first camera to find parent
+            first_cam_files = multicam_feed[cameras[0]]
+            if not first_cam_files:
+                raise ValueError(f"Camera {cameras[0]} has no images!")
+                
+            first_image_path = Path(first_cam_files[0])
+            parent_dir = first_image_path.parent
+            if parent_dir.name == cameras[0]:
+                 parent_dir = parent_dir.parent
+            
+            FreeFlowUtils.log(f"Detected Project Parent Directory: {parent_dir}")
+            workspace = parent_dir / "FreeFlow_Colmap"
+
         # Persistent Output Workspace
-        workspace = parent_dir / "FreeFlow_Colmap"
         sparse_dir = workspace / "sparse"
         reconstruction = sparse_dir / "0"
         points_file = reconstruction / "points3D.bin"
@@ -354,6 +403,12 @@ class FreeFlow_ColmapAnchor:
         # Copy selected frames from each camera
         FreeFlowUtils.log(f"DEBUG: Processing Multicam Feed with {len(cameras)} cameras.")
         
+        # --- REAL FRAME MAPPING ---
+        all_frame_numbers = self._extract_frame_numbers(multicam_feed)
+        # Verify length matches first camera (assuming sync)
+        if len(all_frame_numbers) != len(multicam_feed[cameras[0]]):
+             all_frame_numbers = list(range(len(multicam_feed[cameras[0]])))
+
         image_count = 0
         
         FreeFlowUtils.log("Preparing Images...")
@@ -363,13 +418,17 @@ class FreeFlow_ColmapAnchor:
             if not frames:
                 continue
             
-            # Parse frame selection for THIS camera (assuming sync)
-            indices_to_process = self._parse_frames(frame_selection, len(frames))
+            # Parse frame selection using REAL numbers
+            # indices_to_process will be 0-based array indices
+            indices_to_process = self._parse_frames(frame_selection, all_frame_numbers)
             
             for idx in indices_to_process:
                 src = Path(frames[idx])
-                # Naming convention: camName_frameIndex.ext to ensure uniqueness
-                dst_name = f"{cam}_{idx:04d}{src.suffix}"
+                real_id = all_frame_numbers[idx]
+                
+                # Naming convention: camName_frameIndex.ext using REAL ID
+                # This ensures AdaptiveEngine sees 'cam_0195.jpg' if processing frame 195
+                dst_name = f"{cam}_{real_id:04d}{src.suffix}"
                 dst = images_dir / dst_name
                 shutil.copy2(src, dst)
                 image_count += 1

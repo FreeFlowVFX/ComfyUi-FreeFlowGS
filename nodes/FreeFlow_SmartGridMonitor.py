@@ -38,6 +38,67 @@ class FreeFlow_SmartGridMonitor:
     OUTPUT_NODE = True
     CATEGORY = "FreeFlow"
 
+    def _extract_frame_numbers(self, multicam_feed):
+        """Extract numeric frame IDs from the camera with the most frames."""
+        if not multicam_feed:
+            return []
+        
+        best_cam = max(multicam_feed, key=lambda k: len(multicam_feed[k]))
+        file_paths = multicam_feed[best_cam]
+        
+        frame_nums = []
+        import re
+        for fp in file_paths:
+            fname = Path(fp).stem
+            nums = re.findall(r'\d+', fname)
+            if nums:
+                 frame_nums.append(int(nums[-1]))
+            else:
+                 frame_nums.append(len(frame_nums))
+        return frame_nums
+
+    def _parse_frames(self, frame_str, available_frames):
+        """Parse frame selection using Real Frame Numbers."""
+        frame_str = str(frame_str).lower().strip()
+        max_idx = len(available_frames)
+        
+        if frame_str == "*" or frame_str == "all":
+            return list(range(max_idx))
+            
+        indices = set()
+        parts = frame_str.split(',')
+        
+        desired_frames = set()
+        ranges = []
+        
+        for part in parts:
+            part = part.strip()
+            if not part: continue
+            if '-' in part:
+                 try:
+                    s, e = map(int, part.split('-'))
+                    ranges.append((s, e))
+                 except: pass
+            else:
+                 try:
+                    desired_frames.add(int(part))
+                 except: pass
+                 
+        final_indices = []
+        for idx, frame_num in enumerate(available_frames):
+            match = False
+            if frame_num in desired_frames:
+                match = True
+            else:
+                for (s, e) in ranges:
+                    if s <= frame_num <= e:
+                        match = True
+                        break
+            if match:
+                final_indices.append(idx)
+                
+        return sorted(final_indices)
+
     def monitor(self, multicam_feed, fps, grid_resolution, output_grid_image, cam_filter="*", show_labels=True, label_size=30, label_position="Top Left", frame_range="*", audio=None):
         print("DEBUG: Generating Smart Grid Video Preview...")
         from ..utils import FreeFlowUtils 
@@ -74,43 +135,19 @@ class FreeFlow_SmartGridMonitor:
         }
         target_w, target_h = res_map.get(grid_resolution, (1920, 1080))
 
-        # 2. Frame Range Parsing
-        # Determine total possible frames from input
-        total_available_frames = 0
-        for cam in cameras:
-            total_available_frames = max(total_available_frames, len(multicam_feed[cam]))
-            
-        indices_to_process = []
-        
-        fr = frame_range.strip()
-        # Default behavior: If '*' or empty, USE EVERYTHING found in feed.
-        if fr == "*" or fr.lower() == "all" or not fr:
-             indices_to_process = list(range(total_available_frames))
-        else:
-            # Parse list/range
-            try:
-                parts = fr.split(",")
-                for p in parts:
-                    p = p.strip()
-                    if "-" in p:
-                        start, end = map(int, p.split("-"))
-                        # Clamp end
-                        end = min(end, total_available_frames)
-                        indices_to_process.extend(range(start, end)) 
-                    else:
-                        idx = int(p)
-                        if idx < total_available_frames:
-                            indices_to_process.append(idx)
-            except ValueError:
-                print(f"WARN: Invalid frame range '{frame_range}'. Using first 100 frames as failsafe.")
-                indices_to_process = list(range(min(100, total_available_frames)))
-                
-        # Sort and deduplicate
-        indices_to_process = sorted(list(set(indices_to_process)))
+        # 2. Frame Range Parsing (REAL NUMBERS)
+        # Extract Real IDs
+        all_frame_numbers = self._extract_frame_numbers(multicam_feed)
+        # Fallback length check
+        cam0_len = len(multicam_feed[cameras[0]]) if cameras else 0
+        if len(all_frame_numbers) != cam0_len:
+             all_frame_numbers = list(range(cam0_len))
+             
+        indices_to_process = self._parse_frames(frame_range, all_frame_numbers)
         
         if not indices_to_process:
-             print("WARN: No frames selected. Defaulting to first 10.")
-             indices_to_process = list(range(min(10, total_available_frames)))
+              print(f"WARN: No frames matched '{frame_range}'. Defaulting to first 10.")
+              indices_to_process = list(range(min(10, cam0_len)))
 
         # 2a. Update Cache Hash with Frame Range
         hasher = hashlib.md5()

@@ -89,13 +89,16 @@ class FreeFlow_PLYSequenceLoader:
             if not final_files:
                 # Filter based on extracted numbers
                 # Only include files that have a valid number AND are in the allowed set
-                # OR include files with no number? (Usually exclude)
                 
                 filtered = []
                 for item in files_with_nums:
                     if item['num'] != -1 and item['num'] in allowed_frames:
                         filtered.append(item['path'])
+                    # DEBUG: Uncomment to see what's happening
+                    # else:
+                    #     FreeFlowUtils.log(f"Skipped {item['path'].name}: num={item['num']}, allowed={allowed_frames}")
                 
+                FreeFlowUtils.log(f"Frame filter: allowed={sorted(list(allowed_frames))[:10]}... matched {len(filtered)}/{len(files_with_nums)} files")
                 final_files = filtered
 
         if not final_files:

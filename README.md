@@ -42,10 +42,10 @@ Scans a directory for subfolders containing image sequences. It automatically de
 
 ### ⚓ FreeFlow COLMAP Anchor
 Runs Structure-from-Motion (SfM) on Frame 0 to create a sparse point cloud. This "anchor" ensures all subsequent frames share a common coordinate system and scale.
-- **Inputs**: `multicam_feed`
 - **Parameters**: 
   - `quality`: Preset (Low/Medium/High/Extreme).
   - `camera_model`: `OPENCV` (standard) or `PINHOLE`.
+  - `frame_selection`: Supports range (`0-10`), list (`1,5`), or wildcard (`all`, `*`).
   - `matching_method`: `Exhaustive` (Accurate), `Sequential` (Fast for video), `VocabTree` (Fast for large datasets).
 
 ### 🧠 FreeFlow 4D Adaptive Engine

@@ -26,6 +26,66 @@ app.registerExtension({
 
                 // Capture all widgets initially to preserve order and references
                 const allWidgets = [...this.widgets];
+                this._freeflow_all_widgets = allWidgets; // Persist for serialization
+
+                // Hook Serialization to save ALL values, including hidden ones
+                // This prevents data loss/shifting when saving with hidden params
+                const onSerialize = this.onSerialize;
+                this.onSerialize = function (o) {
+                    if (onSerialize) onSerialize.apply(this, arguments);
+
+                    if (this._freeflow_all_widgets) {
+                        // Overwrite the truncated widgets_values with the full list
+                        o.widgets_values = this._freeflow_all_widgets.map(w => w.value);
+                    }
+                };
+
+                // Smart Restoration for Truncated Saves
+                const onConfigure = this.onConfigure;
+                this.onConfigure = function (o) {
+                    if (onConfigure) onConfigure.apply(this, arguments);
+
+                    if (this._freeflow_all_widgets && o.widgets_values && o.widgets_values.length < this._freeflow_all_widgets.length) {
+                        console.log("[FreeFlow] Detected version mismatch/truncation. Attempting smart restoration...");
+                        const saved = o.widgets_values;
+                        const full = [];
+                        let savedIdx = 0;
+                        const currentVals = {};
+
+                        // Default Controller Values
+                        currentVals["visualize_training"] = "Off";
+                        currentVals["topology_mode"] = "Dynamic (Default-Flicker)";
+                        currentVals["distributed_anchor"] = false;
+
+                        for (const w of this._freeflow_all_widgets) {
+                            // Standard Visibility Logic (Must match updateVisibility)
+                            const viz = currentVals["visualize_training"];
+                            const topo = currentVals["topology_mode"];
+                            const dist = currentVals["distributed_anchor"];
+
+                            let visible = true;
+                            if (w.name === "preview_interval" || w.name === "preview_camera_filter" || w.name === "eval_camera_index") {
+                                visible = (viz === "Save Preview Images");
+                            } else if (w.name === "apply_smoothing") {
+                                visible = (topo && topo.includes("Fixed"));
+                            } else if (w.name === "distributed_anchor_path" || w.name === "distributed_anchor_frame" || w.name === "warmup_frames") {
+                                visible = dist;
+                            }
+
+                            if (visible && savedIdx < saved.length) {
+                                const val = saved[savedIdx++];
+                                w.value = val;
+                                currentVals[w.name] = val;
+                                full.push(val);
+                            } else {
+                                full.push(w.value);
+                                currentVals[w.name] = w.value;
+                            }
+                        }
+
+                        o.widgets_values = full;
+                    }
+                };
 
                 // Callback to toggle visibility
                 const updateVisibility = () => {

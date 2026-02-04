@@ -35,7 +35,7 @@ class FreeFlow_MultiCamLoader:
         
         ignored_folders = {
             "sparse", "dense", "database", "colmap_out", "output", "__macosx", 
-            "checkpoints", "logs", "config"
+            "checkpoints", "logs", "config", "freeflow_colmap", "images"
         }
         
         valid_extensions = {".jpg", ".jpeg", ".png", ".exr", ".tif", ".tiff", ".bmp", ".webp"}

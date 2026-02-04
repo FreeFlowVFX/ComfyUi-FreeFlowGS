@@ -96,45 +96,106 @@ class FreeFlow_AdaptiveEngine:
     CATEGORY = "FreeFlow"
     OUTPUT_NODE = True
 
-    def _parse_frames(self, frame_str, max_frames):
-        """Parse string for frame indices (e.g. '0', '0-10', '1,5,10', 'all')."""
-        frame_str = str(frame_str).lower().strip()
-        
-        if frame_str == "all":
-            return list(range(max_frames))
+    def _extract_frame_numbers(self, multicam_feed):
+        """
+        Extract numeric frame IDs from the camera with the most frames.
+        Returns a list of ints.
+        """
+        if not multicam_feed:
+            return []
             
+        # Find camera with maximum frames to ensure we get the full range
+        # (Handles cases where some cameras might be missing frames if not synced)
+        best_cam = max(multicam_feed, key=lambda k: len(multicam_feed[k]))
+        file_paths = multicam_feed[best_cam]
+        
+        frame_nums = []
+        import re
+        
+        for fp in file_paths:
+            fname = Path(fp).stem
+            # Find all digit sequences
+            matches = re.findall(r'\d+', fname)
+            if matches:
+                # Use the LAST sequence of digits as the frame number
+                frame_nums.append(int(matches[-1]))
+            else:
+                # Fallback: Sequential index if no digits found
+                frame_nums.append(len(frame_nums))
+                
+        # Debug Log
+        if frame_nums:
+             print(f"DEBUG: Extracted frame numbers from '{best_cam}' (Range: {frame_nums[0]} - {frame_nums[-1]})")
+        else:
+             print(f"DEBUG: Failed to extract frame numbers from '{best_cam}'")
+             
+        return frame_nums
+
+    def _parse_frames(self, frame_str, available_frames):
+        """
+        Parse string for frame INDICES based on real frame NUMBERS.
+        frame_str: e.g. '0', '100-200', 'all'
+        available_frames: list of actual frame numbers present in input [195, 196, 197...]
+        
+        Returns: LIST of INDICES (0-based) to process from the input array.
+        """
+        frame_str = str(frame_str).lower().strip()
+        max_idx = len(available_frames)
+        
+        if frame_str == "all" or frame_str == "*":
+            return list(range(max_idx))
+            
+        # Map FrameNum -> List of Indices (handle duplicates if any, though unlikely)
+        # But mostly we iterate available_frames and check if they match criteria
+        
         indices = set()
         parts = frame_str.split(',')
+        
+        # Prepare a set of requested frames for O(1) lookup ?? 
+        # No, ranges make that hard. We verify each available frame against the request.
+        
+        # Actually, simpler: Parse request into a set/ranges of Desired Numbers.
+        # Then filter available_frames.
+        
+        # Step 1: Parse request into list of desired integers
+        desired_frames = set()
+        # Keep track of ranges to check
+        ranges = []
         
         for part in parts:
             part = part.strip()
             if not part: continue
             
             if '-' in part:
-                # Range: "start-end"
-                try:
-                    start, end = map(int, part.split('-'))
-                    # Inclusive range
-                    for i in range(start, end + 1):
-                        if 0 <= i < max_frames:
-                            indices.add(i)
-                except ValueError:
-                    FreeFlowUtils.log(f"Invalid frame range format: {part}", "WARN")
+                 try:
+                    s, e = map(int, part.split('-'))
+                    ranges.append((s, e))
+                 except: 
+                    FreeFlowUtils.log(f"Invalid range: {part}", "WARN")
             else:
-                # Single index
-                try:
-                    i = int(part)
-                    if 0 <= i < max_frames:
-                        indices.add(i)
-                except ValueError:
-                    FreeFlowUtils.log(f"Invalid frame index: {part}", "WARN")
-                    
-        sorted_indices = sorted(list(indices))
-        if not sorted_indices:
-            FreeFlowUtils.log("No valid frames selected. Defaulting to all.", "WARN")
-            return list(range(max_frames))
+                 try:
+                    desired_frames.add(int(part))
+                 except: pass
+                 
+        # Step 2: Find indices where frame_num matches
+        final_indices = []
+        for idx, frame_num in enumerate(available_frames):
+            match = False
+            if frame_num in desired_frames:
+                match = True
+            else:
+                for (s, e) in ranges:
+                    if s <= frame_num <= e:
+                        match = True
+                        break
             
-        return sorted_indices
+            if match:
+                final_indices.append(idx)
+                
+        if not final_indices:
+             FreeFlowUtils.log(f"Warning: No frames matched selection '{frame_str}' in available frames {available_frames[:5]}...", "WARN")
+             
+        return sorted(final_indices)
 
     def _export_sparse_to_ply(self, sparse_dir, output_ply):
         """
@@ -364,6 +425,9 @@ class FreeFlow_AdaptiveEngine:
         Frame 0: Initialize from sparse cloud (if enabled)
         Frame 1+: Warm-start from previous frame's output
         """
+        import shutil
+        import threading
+        
         # 1. Setup Output Directory
         if custom_output_path and custom_output_path.strip():
             # Handle "~" expansion for Home directory
@@ -394,13 +458,29 @@ class FreeFlow_AdaptiveEngine:
         cameras = list(multicam_feed.keys())
         total_frames = max(len(multicam_feed[cam]) for cam in cameras)
         
-        # PARSE FRAME SELECTION
-        indices_to_process = self._parse_frames(frame_selection, total_frames)
+        # --- REAL FRAME MAPPING ---
+        # Extract actual frame numbers from filenames (e.g. 195, 196...)
+        all_frame_numbers = self._extract_frame_numbers(multicam_feed)
+        if len(all_frame_numbers) != total_frames:
+             # Fallback if mismatch (shouldn't happen if uniform)
+             all_frame_numbers = list(range(total_frames))
+
+        # PARSE FRAME SELECTION (Pass REAL numbers)
+        # Returns indices (0-based) into the multicam_feed arrays
+        indices_to_process = self._parse_frames(frame_selection, all_frame_numbers)
         
         FreeFlowUtils.log("=" * 50)
         FreeFlowUtils.log("FreeFlow Adaptive Engine - Starting 4D Generation")
         FreeFlowUtils.log(f"Cameras: {len(cameras)} | Total Frames: {total_frames}")
-        FreeFlowUtils.log(f"Selected Frames: {len(indices_to_process)} ({indices_to_process})")
+        
+        # Log range of actual frames
+        if indices_to_process:
+             first_id = all_frame_numbers[indices_to_process[0]]
+             last_id = all_frame_numbers[indices_to_process[-1]]
+             FreeFlowUtils.log(f"Processing {len(indices_to_process)} frames. (indices: {len(indices_to_process)})")
+        else:
+             FreeFlowUtils.log("No frames selected!", "WARN")
+             
         FreeFlowUtils.log("=" * 50)
 
         # COLMAP Anchor Path
@@ -435,23 +515,41 @@ class FreeFlow_AdaptiveEngine:
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
 
-        target_anchor_id = indices_to_process[0] # Default: First frame of THIS batch
+        # --- DISTRIBUTED PRIORITY LOGIC (Updated for Real IDs) ---
+        # Default: First frame of THIS batch
+        target_anchor_id = all_frame_numbers[indices_to_process[0]] if indices_to_process else 0
+        
         if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
-             target_anchor_id = int(distributed_anchor_frame.strip())
-             # Priority: If target anchor is in our list, move it to FRONT
-             if target_anchor_id in indices_to_process:
-                 indices_to_process.remove(target_anchor_id)
-                 indices_to_process.insert(0, target_anchor_id)
-                 print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue to generate Anchor.")
+             target_anchor_input = int(distributed_anchor_frame.strip())
+             
+             # Check if this Desired ID exists in our process queue
+             # mapped_id = all_frame_numbers[feed_idx]
+             
+             found_queue_idx = -1
+             for qg_idx, feed_idx in enumerate(indices_to_process):
+                  if all_frame_numbers[feed_idx] == target_anchor_input:
+                       found_queue_idx = qg_idx
+                       break
+             
+             if found_queue_idx != -1:
+                  # Move to front
+                  feed_idx = indices_to_process.pop(found_queue_idx)
+                  indices_to_process.insert(0, feed_idx)
+                  target_anchor_id = target_anchor_input
+                  print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue.")
         
         auto_anchor_filename = f"anchor_frame_{target_anchor_id}.ply"
         # -------------------------
 
         for idx, i in enumerate(indices_to_process):
-            frame_work_dir = output_dir / f"frame_{i:04d}_work"
-            ply_out = output_dir / f"{filename_prefix}_frame_{i:04d}.ply"
+            # i is the FEED INDEX (0-based array index)
+            # real_frame_id is the actual number (e.g. 195)
+            real_frame_id = all_frame_numbers[i]
             
-            # Prepare folder structure
+            frame_work_dir = output_dir / f"frame_{real_frame_id:04d}_work"
+            ply_out = output_dir / f"{filename_prefix}_frame_{real_frame_id:04d}.ply"
+            
+            # Prepare folder structure (Use 'i' for array access)
             active_cams = self._prepare_brush_folder(
                 frame_work_dir, multicam_feed, i, anchor_sparse, filename_map, use_symlinks,
                 mask_engine, prev_images_paths, masking_method 
@@ -488,7 +586,7 @@ class FreeFlow_AdaptiveEngine:
             if init_source_ply:
                 converted_ok = self._convert_ply_to_points3d(init_source_ply, sparse_target / "points3D.ply")
                 if converted_ok:
-                    print(f"   🚀 Initializing Frame {i} from {init_mode}") # FreeFlowUtils.log not imported? use print
+                    print(f"   🚀 Initializing Frame {real_frame_id} from {init_mode}") # FreeFlowUtils.log not imported? use print
             pass # Spacer
             
             # Build Brush command (Only use supported flags)
@@ -532,11 +630,11 @@ class FreeFlow_AdaptiveEngine:
                     "--prune_from_iter", "999999",
                     "--opacity_reset_interval", "999999",
                 ])
-                print(f"   🔒 [Fixed Topology] Frame {i}: Topology Locked (Strict Frozen Mode)")
+                print(f"   🔒 [Fixed Topology] Frame {real_frame_id}: Topology Locked (Strict Frozen Mode)")
             
             # Execute training with Real-time Parsing
             frame_pct = ((idx + 1) / len(indices_to_process)) * 100
-            FreeFlowUtils.log(f"🎬 Frame {idx+1}/{len(indices_to_process)} ({frame_pct:.1f}% global) - Training frame index {i}...")
+            FreeFlowUtils.log(f"🎬 Frame {idx+1}/{len(indices_to_process)} ({frame_pct:.1f}% global) - Training frame index {real_frame_id}...")
             
             # Force unbuffered python output for the subprocess if possible
             env = os.environ.copy()
@@ -566,7 +664,7 @@ class FreeFlow_AdaptiveEngine:
             
             # Pass reference to self so simulator can update cached speed
             # Also pass visualization mode for file-based progress
-            frame_name = f"{filename_prefix}_frame_{i:04d}"
+            frame_name = f"{filename_prefix}_frame_{real_frame_id:04d}"
             pbar_thread = threading.Thread(
                 target=self._pbar_simulator, 
                 args=(pbar, iterations, seconds_per_step, current_step_global, process, idx == 0, visualize_training, frame_name)
@@ -644,7 +742,7 @@ class FreeFlow_AdaptiveEngine:
 
             # --- DISTRIBUTED: Save Anchor ---
             # Save IF: Distributed Enabled AND Current Frame is the Target Anchor
-            if distributed_anchor and i == target_anchor_id and ply_out.exists():
+            if distributed_anchor and real_frame_id == target_anchor_id and ply_out.exists():
                 distributed_dir = output_dir / "Distributed_Anchor"
                 distributed_dir.mkdir(exist_ok=True)
                 anchor_dst = distributed_dir / auto_anchor_filename
@@ -656,7 +754,7 @@ class FreeFlow_AdaptiveEngine:
             # If warmup, move result to temp folder to avoid cluttering main output
             is_warmup = (idx < warmup_frames)
             # Force keep if it's the anchor (we usually want the anchor frame in the sequence)
-            if distributed_anchor and i == target_anchor_id:
+            if distributed_anchor and real_frame_id == target_anchor_id:
                 is_warmup = False
             
             if is_warmup:
@@ -666,7 +764,7 @@ class FreeFlow_AdaptiveEngine:
                  import shutil
                  shutil.move(str(ply_out), str(warmup_path))
                  prev_ply = warmup_path
-                 print(f"   🔥 Warmup: Moved Frame {i} to temp storage.")
+                 print(f"   🔥 Warmup: Moved Frame {real_frame_id} to temp storage.")
             else:
                  prev_ply = ply_out
 
