@@ -1,149 +1,168 @@
-// Web Worker for 3DGS Splat Sorting
-// Optimized for performance
+// FreeFlow Splat Sorting Worker
+// Handles Depth Sorting AND Data Reordering to unblock Main Thread
 
-const cache = {};
+let cachedPositions = null;
+let cachedColors = null;
+let cachedScales = null;
+let cachedRots = null;
+
+let cachedVertexCount = 0;
+let cachedMeshId = null;
+
+// Dual-Buffer for Output (Double Buffering to avoid allocation)
+// We flip between buffer A and B
+let bufferSet = 0;
+let outBuffers = [
+    { positions: null, colors: null, scales: null, rots: null },
+    { positions: null, colors: null, scales: null, rots: null }
+];
+
+// Pre-allocated Sort Arrays
+let depths = new Float32Array(0);
+let indices = new Uint32Array(0);
 
 self.onmessage = function (e) {
-    let { positions, viewMatrix, vertexCount, meshId } = e.data;
+    const { viewMatrix, meshId, positions, colors, scales, rots, vertexCount } = e.data;
 
-    // Update Cache if new data provided
-    if (meshId && positions) {
-        cache[meshId] = {
-            positions: (positions instanceof ArrayBuffer) ? new Float32Array(positions) : positions,
-            vertexCount: vertexCount
-        };
-    }
+    // 1. Update Cache if New Mesh Data
+    if (meshId !== cachedMeshId && positions) {
+        cachedMeshId = meshId;
+        cachedVertexCount = vertexCount;
 
-    // Retrieve from Cache if simple update
-    if (!positions && meshId && cache[meshId]) {
-        positions = cache[meshId].positions;
-        vertexCount = cache[meshId].vertexCount;
-    }
+        // Copy Input Data (Immutable Source)
+        // We assume Transferable was used if possible, or copy
+        cachedPositions = new Float32Array(positions);
+        cachedColors = new Float32Array(colors);
+        cachedScales = new Float32Array(scales);
+        cachedRots = new Float32Array(rots);
 
-    if (!positions || !viewMatrix) {
-        // If we still don't have positions (and no cache), we can't sort.
-        // But we MUST reply to unlock the main thread (sortReady = true).
-        if (meshId) {
-            self.postMessage({ sortedIndices: null, meshId: meshId });
+        // Resize Internal Buffers
+        if (depths.length !== cachedVertexCount) {
+            depths = new Float32Array(cachedVertexCount);
+            indices = new Uint32Array(cachedVertexCount);
+
+            // Resize Output Buffers
+            for (let i = 0; i < 2; i++) {
+                outBuffers[i].positions = new Float32Array(cachedVertexCount * 3);
+                outBuffers[i].colors = new Float32Array(cachedVertexCount * 4);
+                outBuffers[i].scales = new Float32Array(cachedVertexCount * 3);
+                outBuffers[i].rots = new Float32Array(cachedVertexCount * 4);
+            }
         }
-        return;
     }
 
-    // View matrix Layout:
-    // [0, 1, 2, 3]
-    // [4, 5, 6, 7]
-    // [8, 9, 10, 11]
-    // [12, 13, 14, 15]
-    // We need the Z-axis vector (row 2 for column-major, or correct indices for dot product)
-    // 3D Point p -> View Space v = V * p
-    // v.z = m[2]*x + m[6]*y + m[10]*z + m[14]
+    if (!cachedPositions || cachedVertexCount === 0) return;
 
-    const m = viewMatrix;
-    // const vertices = (positions instanceof ArrayBuffer) ? new Float32Array(positions) : positions; // Handled in cache
-    const vertices = positions;
-    const count = vertexCount;
+    // 2. Calculate Depths
+    const m2 = viewMatrix[2];
+    const m6 = viewMatrix[6];
+    const m10 = viewMatrix[10];
+    const m14 = viewMatrix[14];
 
-    // 1. Calculate Depths
-    // We can use a shared buffer or create one.
-    // Let's assume we create a Float32Array for depths.
-    const depths = new Float32Array(count);
-    const indices = new Uint32Array(count);
-
-    for (let i = 0; i < count; i++) {
-        const x = vertices[3 * i];
-        const y = vertices[3 * i + 1];
-        const z = vertices[3 * i + 2];
-
-        // Calculate depth (view Z)
-        // Note: For standard OpenGL/WebGL, -Z is forward. 
-        // Larger Z = closer? Or usually standard view matrix transforms world to negative Z.
-        // We want to sort from Farthest to Nearest (Back to Front) for Painter's Algorithm.
-        // Higher depth value usually means "farther" in positive Z, but in view space, often -Z is forward.
-        // Let's standardly sort by projected View Z.
-        // If sorting max->min, we render far first.
-
-        depths[i] = m[2] * x + m[6] * y + m[10] * z + m[14];
-        indices[i] = i;
-    }
-
-    // 2. Sort Indices based on Depth
-    // A standard `sort` is O(N log N).
-    // Count Sort is O(N) but requires integer depths.
-
-    // Efficient Counting Sort:
-    // Determine bounds
     let minDepth = Infinity;
     let maxDepth = -Infinity;
 
-    for (let i = 0; i < count; i++) {
-        const d = depths[i];
-        if (d < minDepth) minDepth = d;
-        if (d > maxDepth) maxDepth = d;
+    for (let i = 0; i < cachedVertexCount; i++) {
+        const x = cachedPositions[3 * i];
+        const y = cachedPositions[3 * i + 1];
+        const z = cachedPositions[3 * i + 2];
+
+        // Dot Product with ViewDir (Z-row of ViewMatrix)
+        const val = (x * m2) + (y * m6) + (z * m10) + m14;
+
+        depths[i] = val;
+        indices[i] = i;
+
+        if (val < minDepth) minDepth = val;
+        if (val > maxDepth) maxDepth = val;
     }
 
+    // 3. High-Performance Counting Sort (O(N))
     const range = maxDepth - minDepth;
+    if (range > 0.0001) {
+        const invRange = 1.0 / range;
+        const totalBuckets = Math.min(65535, cachedVertexCount);
+        const counts = new Uint32Array(totalBuckets);
+        const mappedDepths = new Uint16Array(cachedVertexCount);
 
-    // If range is tiny, just return (avoid div/0)
-    if (range < 0.0001) {
-        self.postMessage({ sortedIndices: indices }, [indices.buffer]);
-        return;
+        for (let i = 0; i < cachedVertexCount; i++) {
+            let norm = (depths[i] - minDepth) * invRange;
+            // Standard Norm (0..1)
+            // Far (-Large) -> 0. Near (-Small) -> 1.
+            // Bucket 0 = Far.
+
+            const bucket = Math.floor(norm * (totalBuckets - 1));
+            counts[bucket]++;
+            mappedDepths[i] = bucket;
+        }
+
+        // Cumulative
+        let starts = new Uint32Array(totalBuckets);
+        let run = 0;
+        for (let i = 0; i < totalBuckets; i++) {
+            starts[i] = run;
+            run += counts[i];
+        }
+
+        // Place
+        const sortedIndices = new Uint32Array(cachedVertexCount);
+        for (let i = 0; i < cachedVertexCount; i++) {
+            const bucket = mappedDepths[i];
+            const pos = starts[bucket];
+            starts[bucket]++;
+            sortedIndices[pos] = i;
+        }
+
+        indices = sortedIndices;
     }
 
-    // Bucket Count (16-bit sufficient usually)
-    const totalBuckets = 65536;
-    const counts = new Uint32Array(totalBuckets);
-    const mappedIndices = new Uint32Array(count); // Store bucket ID per vertex
 
-    // Pass 1: Count
-    for (let i = 0; i < count; i++) {
-        // Map depth to 0..bucketCount
-        // Sort Back-to-Front (High Z to Low Z? or Low Z to High Z?)
-        // Standard View Space: Camera at 0, looking down -Z. 
-        // Z = -10 (Far), Z = -1 (Near).
-        // Max Z is Near (-1), Min Z is Far (-10).
-        // We want to render Far (-10) first, then Near (-1).
-        // So we want Ascending Sort of signed Z (-10, -9, ..., -1).
-        // OR Descending Sort of Distance (-distance).
+    // 4. Reorder Data (The Heavy Lift)
+    bufferSet = 1 - bufferSet;
+    const out = outBuffers[bufferSet];
+    const sInd = indices;
 
-        // Let's use simple normalized value 0..1
-        // (depth - min) / range => 0 (MinDepth) to 1 (MaxDepth).
+    const sP = cachedPositions;
+    const sC = cachedColors;
+    const sS = cachedScales;
+    const sR = cachedRots;
 
-        // If we want MinDepth first:
-        // bucket = normalized * totalBuckets
+    const tP = out.positions;
+    const tC = out.colors;
+    const tS = out.scales;
+    const tR = out.rots;
 
-        // Invert the normalization to sort Descending (MaxDepth -> MinDepth) ?
-        // Or Ascending?
-        // Current symptom: Seeing back of head -> Near drawn first, Far drawn last (on top).
-        // So we are sorting Near -> Far.
-        // We want Far -> Near.
-        // So we need to reverse the current sorting direction.
+    for (let i = 0; i < cachedVertexCount; i++) {
+        const src = sInd[i];
 
-        let norm = (depths[i] - minDepth) / range;
-        norm = 1.0 - norm; // Restore Inversion (Correct for this coordinate system)
+        // Position (3)
+        const i3 = i * 3;
+        const s3 = src * 3;
+        tP[i3] = sP[s3]; tP[i3 + 1] = sP[s3 + 1]; tP[i3 + 2] = sP[s3 + 2];
 
-        let bucket = Math.floor(norm * (totalBuckets - 1));
+        // Scale (3)
+        tS[i3] = sS[s3]; tS[i3 + 1] = sS[s3 + 1]; tS[i3 + 2] = sS[s3 + 2];
 
-        counts[bucket]++;
-        mappedIndices[i] = bucket;
+        // Color (4)
+        const i4 = i * 4;
+        const s4 = src * 4;
+        tC[i4] = sC[s4]; tC[i4 + 1] = sC[s4 + 1]; tC[i4 + 2] = sC[s4 + 2]; tC[i4 + 3] = sC[s4 + 3];
+
+        // Rot (4)
+        tR[i4] = sR[s4]; tR[i4 + 1] = sR[s4 + 1]; tR[i4 + 2] = sR[s4 + 2]; tR[i4 + 3] = sR[s4 + 3];
     }
 
-    // Prefix Sum
-    let runCount = 0;
-    for (let i = 0; i < totalBuckets; i++) {
-        const c = counts[i];
-        counts[i] = runCount;
-        runCount += c;
-    }
+    // 5. Send Back (Transferables)
+    const pBuf = tP.buffer.slice(0); // Copy to transfer
+    const cBuf = tC.buffer.slice(0);
+    const sBuf = tS.buffer.slice(0);
+    const rBuf = tR.buffer.slice(0);
 
-    // Pass 2: Reorder
-    const sortedIndices = new Uint32Array(count);
-
-    for (let i = 0; i < count; i++) {
-        const bucket = mappedIndices[i];
-        const destIdx = counts[bucket]++;
-        sortedIndices[destIdx] = indices[i];
-    }
-
-    // Return
-    self.postMessage({ sortedIndices, meshId: e.data.meshId }, [sortedIndices.buffer]);
+    self.postMessage({
+        meshId: meshId,
+        sortedPositions: pBuf,
+        sortedColors: cBuf,
+        sortedScales: sBuf,
+        sortedRots: rBuf,
+    }, [pBuf, cBuf, sBuf, rBuf]);
 };

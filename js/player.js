@@ -77,91 +77,41 @@ class FreeFlow4DPlayer {
 
     handleWorkerMessage(e) {
         try {
-            const { sortedIndices, meshId } = e.data;
+            // New Protocol: Worker sends FULL buffers, already sorted.
+            const { sortedPositions, sortedColors, sortedScales, sortedRots, meshId } = e.data;
 
-            if (!sortedIndices) return;
+            if (!sortedPositions) return;
 
-            // Find the correct mesh by ID (it might not be the current one if playback is fast)
+            // Find the correct mesh by ID
             let mesh = null;
             if (meshId) {
                 mesh = this.frames.find(m => m && m.uuid === meshId);
             } else {
-                // Fallback for logic without meshId (startup)
                 mesh = this.frames[this.currentFrame];
             }
 
             if (!mesh || !mesh.geometry) return;
 
             const geometry = mesh.geometry;
-            const vertexCount = sortedIndices.length;
 
-            // Attributes to reorder
-            const centers = geometry.attributes.splatCenter;
-            const colors = geometry.attributes.splatColor;
-            const scales = geometry.attributes.splatScale;
-            const rots = geometry.attributes.splatRot;
+            // Update Attributes (Directly from Worker)
+            // Zero-Copy transfer complete.
+            geometry.attributes.splatCenter.array = new Float32Array(sortedPositions);
+            geometry.attributes.splatColor.array = new Float32Array(sortedColors);
+            geometry.attributes.splatScale.array = new Float32Array(sortedScales);
 
-            if (!centers || !colors || !scales || !rots) return;
-
-            // Optimization: Lazy creation of temp arrays to avoid GC
-            if (!this.tempArrays || this.tempArrays.count !== vertexCount) {
-                this.tempArrays = {
-                    count: vertexCount,
-                    centers: new Float32Array(vertexCount * 3),
-                    colors: new Float32Array(vertexCount * 4),
-                    scales: new Float32Array(vertexCount * 3),
-                    rots: new Float32Array(vertexCount * 4)
-                };
+            // Handle naming variance (splatRot vs splatRotation)
+            if (geometry.attributes.splatRotation) {
+                geometry.attributes.splatRotation.array = new Float32Array(sortedRots);
+                geometry.attributes.splatRotation.needsUpdate = true;
+            } else if (geometry.attributes.splatRot) {
+                geometry.attributes.splatRot.array = new Float32Array(sortedRots);
+                geometry.attributes.splatRot.needsUpdate = true;
             }
 
-            const P = mesh.userData.originalData ? mesh.userData.originalData.positions : centers.array;
-            const C = mesh.userData.originalData ? mesh.userData.originalData.colors : colors.array;
-            const S = mesh.userData.originalData ? mesh.userData.originalData.scales : scales.array;
-            const R = mesh.userData.originalData ? mesh.userData.originalData.rots : rots.array;
-
-            const tP = this.tempArrays.centers;
-            const tC = this.tempArrays.colors;
-            const tS = this.tempArrays.scales;
-            const tR = this.tempArrays.rots;
-
-            // CPU Reorder from Source (P) to Temp (tP) using Sorted Indices
-            for (let i = 0; i < vertexCount; i++) {
-                const src = sortedIndices[i];
-
-                // Center (3)
-                tP[3 * i] = P[3 * src];
-                tP[3 * i + 1] = P[3 * src + 1];
-                tP[3 * i + 2] = P[3 * src + 2];
-
-                // Scale (3)
-                tS[3 * i] = S[3 * src];
-                tS[3 * i + 1] = S[3 * src + 1];
-                tS[3 * i + 2] = S[3 * src + 2];
-
-                // Color (4)
-                tC[4 * i] = C[4 * src];
-                tC[4 * i + 1] = C[4 * src + 1];
-                tC[4 * i + 2] = C[4 * src + 2];
-                tC[4 * i + 3] = C[4 * src + 3];
-
-                // Rotation (4)
-                tR[4 * i] = R[4 * src];
-                tR[4 * i + 1] = R[4 * src + 1];
-                tR[4 * i + 2] = R[4 * src + 2];
-                tR[4 * i + 3] = R[4 * src + 3];
-            }
-
-            // Write back to geometry buffers
-            centers.array.set(tP);
-            colors.array.set(tC);
-            scales.array.set(tS);
-            rots.array.set(tR);
-
-            // Upload to GPU
-            centers.needsUpdate = true;
-            colors.needsUpdate = true;
-            scales.needsUpdate = true;
-            rots.needsUpdate = true;
+            geometry.attributes.splatCenter.needsUpdate = true;
+            geometry.attributes.splatColor.needsUpdate = true;
+            geometry.attributes.splatScale.needsUpdate = true;
 
             // Async Swap: If we just sorted the frame we WANT to see, show it now.
             // This prevents showing the frame before it is sorted (removing flicker).
@@ -183,7 +133,7 @@ class FreeFlow4DPlayer {
         this.element.className = "freeflow-player";
         Object.assign(this.element.style, {
             position: "fixed",
-            zIndex: "1005", // High layer
+            zIndex: "100", // Lowered to allow ComfyUI menus on top (was 1005)
             background: "#000",
             display: "none",
             border: "1px solid #666",
@@ -307,7 +257,13 @@ class FreeFlow4DPlayer {
         this.scrubber.min = 0;
         this.scrubber.value = 0;
         this.scrubber.style.flex = "1";
-        this.scrubber.oninput = (e) => this.seek(parseInt(e.target.value));
+        this.scrubber.oninput = (e) => {
+            const idx = parseInt(e.target.value);
+            this.seek(idx);
+            const real = this.getRealFrameNumber(idx);
+            const count = this.sequenceData?.files?.length || 0;
+            this.frameLabel.innerText = `${real} (${count})`;
+        };
 
         this.frameLabel = document.createElement("span");
         this.frameLabel.innerText = "0 / 0";
@@ -637,7 +593,7 @@ class FreeFlow4DPlayer {
 
         // 4. Playback Controls (FPS)
         const playbackTitle = document.createElement("div");
-        playbackTitle.innerText = "PLAYBACK";
+        playbackTitle.innerText = "PLAYBACK & RENDER";
         playbackTitle.style.marginTop = "12px";
         playbackTitle.style.marginBottom = "4px";
         playbackTitle.style.fontSize = "9px";
@@ -645,6 +601,27 @@ class FreeFlow4DPlayer {
         playbackTitle.style.letterSpacing = "1px";
         playbackTitle.style.fontWeight = "800";
         this.settingsPanel.appendChild(playbackTitle);
+
+        // Depth Sorting Toggle
+        const sortSection = document.createElement("div");
+        sortSection.style.display = "flex";
+        sortSection.style.justifyContent = "space-between";
+        sortSection.style.alignItems = "center";
+        sortSection.style.marginBottom = "8px";
+
+        // Toggle Tooltip
+        sortSection.title = "Controls transparency sorting. Disable for faster playback.";
+        sortSection.innerHTML = "<span style='font-weight:600;'>Depth Sorting</span>";
+
+        const sortSwitch = document.createElement("input");
+        sortSwitch.type = "checkbox";
+        sortSwitch.checked = this.depthSorting;
+        sortSwitch.style.cursor = "pointer";
+        sortSwitch.onchange = (e) => {
+            this.depthSorting = e.target.checked;
+        };
+        sortSection.appendChild(sortSwitch);
+        this.settingsPanel.appendChild(sortSection);
 
         // FPS Slider/Input
         const fpsControl = createControl("FPS", 1, 120, 1, this.fps || 24, (v) => {
@@ -749,7 +726,23 @@ class FreeFlow4DPlayer {
 
     // ... (rest of class) ...
 
+    cleanupSequence() {
+        if (!this.frames) return;
+        this.frames.forEach(mesh => {
+            if (mesh) {
+                this.scene.remove(mesh);
+                if (mesh.geometry) mesh.geometry.dispose();
+                if (mesh.material) mesh.material.dispose();
+            }
+        });
+        this.frames = [];
+        this.cachedMeshId = null; // Reset sort cache
+    }
+
     async loadSequence(data) {
+        // Cleanup existing sequence to prevent "Ghosting"
+        this.cleanupSequence();
+
         this.sequenceData = data;
         this.frames = new Array(data.files.length).fill(null);
         this.fps = data.fps || 24;
@@ -764,7 +757,10 @@ class FreeFlow4DPlayer {
         this.depthSorting = (data.depth_sorting !== undefined) ? data.depth_sorting : true;
 
         this.scrubber.max = data.files.length - 1;
-        this.frameLabel.innerText = `1 / ${data.files.length} `;
+
+        // Update Label with Real Frame Number + Total Count
+        const currentReal = this.getRealFrameNumber(0);
+        this.frameLabel.innerText = `${currentReal} (${data.files.length})`;
 
         // Pre-load first frame
         if (data.files.length > 0) {
@@ -1065,7 +1061,8 @@ class FreeFlow4DPlayer {
                     vec4 centerWorld = modelMatrix * vec4(splatCenter, 1.0);
                     vec4 centerView = viewMatrix * centerWorld;
                     vec4 clipPos = projectionMatrix * centerView;
-                    float pointSize = 3.0; 
+                    // Dynamic Point Size based on Global Scale slider
+                    float pointSize = 3.0 * scaleModifier;  
                     vec2 offset = position.xy * pointSize;
                     clipPos.xy += offset * 2.0 / viewport * clipPos.w;
                     gl_Position = clipPos;
@@ -1177,7 +1174,9 @@ class FreeFlow4DPlayer {
 
             void main () {
                 if (renderMode > 0.5) {
-                     if (dot(vPosition, vPosition) > 9.0) discard;
+                     // Circle Crop (Unit Circle). vPosition is -1..1 generally.
+                     // dot > 1.0 discards corners -> Circular point.
+                     if (dot(vPosition, vPosition) > 1.0) discard;
                      gl_FragColor = vec4(vColor.rgb * vColor.a, vColor.a);
                      return;
                 }
@@ -1300,9 +1299,9 @@ class FreeFlow4DPlayer {
         // Update UI
         this.scrubber.value = idx;
         const total = this.frames.length;
-        const filename = this.sequenceData.files[idx];
-        // Use filename in label context?
-        this.frameLabel.innerText = `${idx + 1} / ${total}`;
+        // Correctly use Real Frame Number during Playback
+        const real = this.getRealFrameNumber(idx);
+        this.frameLabel.innerText = `${real} (${idx + 1}/${total})`;
 
         if (this.infoPanel) this.updateOverlayInfo();
     }
@@ -1476,6 +1475,15 @@ class FreeFlow4DPlayer {
     animate() {
         requestAnimationFrame(() => this.animate());
 
+        // Visibility Check (Minimize Logic)
+        if (this.node && this.node.flags && this.node.flags.collapsed) {
+            if (this.element && this.element.style.display !== "none") {
+                this.element.style.display = "none";
+            }
+            // Skip rendering if minimized
+            return;
+        }
+
         // Time logic
         if (this.isPlaying && this.sequenceData) {
             const now = performance.now();
@@ -1527,8 +1535,19 @@ class FreeFlow4DPlayer {
         const positions = geometry.attributes.splatCenter; // Correct attribute!
         if (!positions) return;
 
-        // Send to Worker
-        const viewMatrix = this.camera.matrixWorldInverse.elements;
+        // Explicitly update camera matrix ensure we sort for the CURRENT position
+        // otherwise we might use the previous frame's matrix (causing "shimmering" or wrong occlusion)
+        this.camera.updateMatrixWorld();
+        this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
+
+        // CRITICAL FIX: Calculate ModelViewMatrix (view * model)
+        // This accounts for the Mesh's rotation (e.g. the 180 flip)
+        // If we only use CameraInverse, we are sorting in World Space but assuming points are World Space (which they are not, they are Local)
+        mesh.updateMatrixWorld();
+        const modelViewMatrix = new window.THREE.Matrix4();
+        modelViewMatrix.multiplyMatrices(this.camera.matrixWorldInverse, mesh.matrixWorld);
+
+        const viewMatrix = modelViewMatrix.elements;
 
         this.sortReady = false;
         this.lastSortTime = now;
@@ -1541,13 +1560,19 @@ class FreeFlow4DPlayer {
         };
 
         if (this.cachedMeshId !== meshId) {
-            // Send new positions (Original immutable source)
+            // Send ALL attributes for caching (Original immutable source)
             if (mesh.userData.originalData) {
-                msg.positions = mesh.userData.originalData.positions.buffer; // Transferable logic check? No, just copy for now
+                msg.positions = mesh.userData.originalData.positions.buffer; // We send copies implicitly via postMessage unless transferred
+                msg.colors = mesh.userData.originalData.colors.buffer;
+                msg.scales = mesh.userData.originalData.scales.buffer;
+                msg.rots = mesh.userData.originalData.rots.buffer;
                 msg.vertexCount = mesh.userData.originalData.vertexCount;
             } else {
-                // Fallback if no backup (shouldn't happen with new loader)
+                // Fallback (Should typically imply originalData exists if loaded correctly)
                 msg.positions = positions.array;
+                msg.colors = geometry.attributes.splatColor.array;
+                msg.scales = geometry.attributes.splatScale.array;
+                msg.rots = geometry.attributes.splatRotation.array;
                 msg.vertexCount = positions.count;
             }
             this.cachedMeshId = meshId;
@@ -1667,10 +1692,25 @@ class FreeFlow4DPlayer {
         this.infoPanel.innerHTML = `
             <div style="color: #ff8800; font-weight: 800; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 5px; margin-bottom: 8px; letter-spacing: 1px;">SPLAT STATISTICS</div>
             <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">FILE:</span> ${filename}</div>
+             <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">FRAME:</span> ${this.getRealFrameNumber(idx)} <span style="font-size:9px; opacity:0.5">(${idx + 1}/${this.frames.length})</span></div>
             <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">COUNT:</span> ${countStr}</div>
             <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">MEMORY:</span> ${memStr}</div>
             <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">RENDER:</span> ${this.renderMode}</div>
+            <div style="margin-bottom: 4px; color: #228B22;"><span style="color: rgba(255,255,255,0.4)">SORTING:</span> ${(this.depthSorting ? "ON" : "OFF")}</div>
             <div style="color: rgba(255,255,255,0.2); font-size: 9px; margin-top: 10px;">Viewport: ${this.element.clientWidth}x${this.element.clientHeight}</div>
         `;
+    }
+
+    getRealFrameNumber(index) {
+        if (!this.sequenceData || !this.sequenceData.files || !this.sequenceData.files[index]) return index + 1;
+        const filename = this.sequenceData.files[index];
+        const match = filename.match(/(\d+)(?=\.\w+$)/); // Match last number before extension
+        if (match) return parseInt(match[1]);
+
+        // Fallback: Try any number in string?
+        const matchAny = filename.match(/(\d+)/g);
+        if (matchAny && matchAny.length > 0) return parseInt(matchAny[matchAny.length - 1]);
+
+        return index + 1;
     }
 }

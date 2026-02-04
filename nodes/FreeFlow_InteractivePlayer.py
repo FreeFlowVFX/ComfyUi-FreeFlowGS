@@ -4,7 +4,6 @@ class FreeFlow_InteractivePlayer:
         return {
             "required": {
                  "camera_far": ("INT", {"default": 5000, "min": 100, "max": 100000, "step": 100}),
-                 "depth_sorting": ("BOOLEAN", {"default": True}),
              },
             "optional": {
                 "ply_sequence_path": ("STRING", {"forceInput": True}),
@@ -17,29 +16,32 @@ class FreeFlow_InteractivePlayer:
     FUNCTION = "play"
     CATEGORY = "FreeFlow"
 
-    def play(self, camera_far, depth_sorting, ply_sequence_path=None, ply_sequence_list=None):
+    def play(self, camera_far, ply_sequence_path=None, ply_sequence_list=None):
         target_path = ""
+        files = []
         
-        # Prefer list if available (from Smoother/Loader)
-        if ply_sequence_list:
-             from pathlib import Path
-             first_file = Path(ply_sequence_list[0])
-             target_path = first_file.parent
+        # Prefer list if available (from Smoother/Loader) - USE IT DIRECTLY!
+        if ply_sequence_list and len(ply_sequence_list) > 0:
+            from pathlib import Path
+            # Use the filtered list directly - DO NOT re-glob!
+            first_file = Path(ply_sequence_list[0])
+            target_path = first_file.parent
+            # Extract just filenames from full paths
+            files = [Path(f).name for f in ply_sequence_list]
         elif ply_sequence_path:
-             from pathlib import Path
-             target_path = Path(ply_sequence_path)
-             
-        if not target_path or not target_path.exists():
+            from pathlib import Path
+            target_path = Path(ply_sequence_path)
+            if target_path.exists():
+                # Only re-glob if using the path input (no filter applied)
+                files = sorted([f.name for f in target_path.glob("*.ply")])
+              
+        if not target_path or not files:
             return {"ui": {"player_data": []}}
 
-        # Scan for PLY files
-        files = sorted([f.name for f in target_path.glob("*.ply")])
-        
         # Return data expected by JS
         return {"ui": {"player_data": [{
             "output_dir": str(target_path),
             "files": files,
             "fps": 24,
-            "camera_far": camera_far,
-            "depth_sorting": depth_sorting
+            "camera_far": camera_far
         }]}}
