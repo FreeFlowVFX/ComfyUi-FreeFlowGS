@@ -19,6 +19,14 @@ app.registerExtension({
                 const topoWidget = findWidget("topology_mode");
                 const smoothWidget = findWidget("apply_smoothing");
 
+                const createAnchorWidget = findWidget("distributed_anchor");
+                const anchorPathWidget = findWidget("distributed_anchor_path");
+                const anchorFrameWidget = findWidget("distributed_anchor_frame");
+                const warmupFramesWidget = findWidget("warmup_frames");
+
+                // Capture all widgets initially to preserve order and references
+                const allWidgets = [...this.widgets];
+
                 // Callback to toggle visibility
                 const updateVisibility = () => {
                     // 1. Preview Controls Visibility
@@ -26,32 +34,23 @@ app.registerExtension({
                     const showPreviewControls = (mode === "Save Preview Images");
 
                     // 2. Smoothing Controls Visibility
-                    // Show only if Fixed Topology
                     const topo = topoWidget ? topoWidget.value : "";
                     const showSmoothing = (topo && topo.includes("Fixed"));
 
-                    // Helper to toggle a single widget
-                    const toggleWidget = (widget, shouldShow) => {
-                        if (!widget) return;
-                        if (!shouldShow) {
-                            if (widget.type !== "converted-widget") { // Prevent double-hiding logic issues
-                                widget.lastType = widget.type;
-                                widget.type = "converted-widget";
-                                widget.computeSize = () => [0, -4];
-                            }
-                        } else {
-                            if (widget.lastType) {
-                                widget.type = widget.lastType;
-                                widget.computeSize = undefined;
-                                widget.lastType = undefined; // Reset
-                            }
-                        }
-                    };
+                    // 3. Distributed Controls Visibility
+                    const showDistributed = createAnchorWidget ? createAnchorWidget.value : false;
 
-                    toggleWidget(intervalWidget, showPreviewControls);
-                    toggleWidget(filterWidget, showPreviewControls);
-                    toggleWidget(evalCameraWidget, showPreviewControls);
-                    toggleWidget(smoothWidget, showSmoothing);
+                    // Filter widgets based on conditions
+                    this.widgets = allWidgets.filter(w => {
+                        if (w.name === "preview_interval") return showPreviewControls;
+                        if (w.name === "preview_camera_filter") return showPreviewControls;
+                        if (w.name === "eval_camera_index") return showPreviewControls;
+                        if (w.name === "apply_smoothing") return showSmoothing;
+                        if (w.name === "distributed_anchor_path") return showDistributed;
+                        if (w.name === "distributed_anchor_frame") return showDistributed;
+                        if (w.name === "warmup_frames") return showDistributed;
+                        return true; // Show strictly required/other widgets
+                    });
 
                     this.setSize([this.size[0], this.computeSize([this.size[0], this.size[1]])[1]]);
 
@@ -67,6 +66,12 @@ app.registerExtension({
 
                 if (topoWidget) {
                     topoWidget.callback = () => {
+                        updateVisibility();
+                    };
+                }
+
+                if (createAnchorWidget) {
+                    createAnchorWidget.callback = () => {
                         updateVisibility();
                     };
                 }

@@ -42,15 +42,15 @@ class FreeFlow_AdaptiveEngine:
                 # --- 1. Data Inputs ---
                 "multicam_feed": ("MULTICAM_DICT",),
                 "colmap_anchor": ("COLMAP_DATA",),
-                
-                # --- 2. Visualization & Monitoring (Top for Access) ---
+            },
+            "optional": {
+                # --- 2. Visualization & Monitoring ---
                 "visualize_training": (["Off", "Save Preview Images", "Spawn Native GUI"], {"default": "Off", "tooltip": "Visual feedback. 'Save Preview Images' renders snapshots. 'Spawn Native GUI' opens Brush app."}),
-
                 "preview_interval": ("INT", {"default": 500, "min": 100, "max": 5000, "tooltip": "Step interval for previews/updates."}),
                 "preview_camera_filter": ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. cam01 (Empty = Show All/Latest)", "tooltip": "Filter preview to specific camera name."}),
                 "eval_camera_index": ("INT", {"default": 10, "min": 1, "max": 100, "tooltip": "[Preview Mode Only] Render every Nth camera for preview. E.g. if you have 16 cameras: 1 = all cameras, 8 = cam0 + cam8, 15 = cam0 + cam15."}),
 
-                # --- 3. Topology Control (Critical) ---
+                # --- 3. Topology Control ---
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Fixed Mode prevents adding/removing points after Frame 0. Eliminate flickering for smooth video."}),
                 "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay filtering to output. REQUIRES Fixed Topology."}),
                 
@@ -60,31 +60,32 @@ class FreeFlow_AdaptiveEngine:
                 "iterations": ("INT", {"default": 10000, "min": 1000, "max": 50000, "tooltip": "Steps per frame. Higher (10k+) reduces flicker but takes longer."}),
                 
                 # --- 5. Advanced Optimization ---
-                "learning_rate": ("FLOAT", {"default": 0.0005, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Position Learning Rate. Lower (0.0005) is more stable/smooth. Higher is faster but jittery."}),
+                "learning_rate": ("FLOAT", {"default": 0.0005, "min": 0.0001, "max": 0.05, "step": 0.00001, "tooltip": "Position Learning Rate. Lower (0.0005) is more stable/smooth. Higher is faster but jittery."}),
                 "densification_interval": ("INT", {"default": 300, "min": 10, "max": 1000, "tooltip": "How often to split/clone gaussians. Higher (300) = more stable structure."}),
                 "opacity_reset_interval": ("INT", {"default": 5000, "min": 100, "max": 10000, "tooltip": "Reset opacity to cull faint blobs. Set high (5000) for temporal stability."}),
                 "densify_grad_threshold": ("FLOAT", {"default": 0.0002, "min": 0.00001, "max": 0.01, "step": 0.00001, "tooltip": "Threshold for adding new points. Lower = more detail."}),
-            },
-            "optional": {
-                # --- Efficiency (Moved from Required) ---
-                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Create shortcuts to images instead of copying them. Saves massive disk space."}),
-
-                # --- Frame Selection ---
-                "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Frames to process. e.g. '0, 5, 10-20' or 'all'."}),
                 
-                # --- Initialization ---
+                # --- 6. Initialization & Selection ---
+                "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Frames to process. e.g. '0, 5, 10-20' or 'all'."}),
                 "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize Frame 0 from COLMAP point cloud. Essential for correct scale/orientation."}),
                 "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "Optical Flow (Robust)", "tooltip": "Method for calculating motion mask. 'Optical Flow' is best for videos. 'Simple Diff' is faster but flickers."}),
                 "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "Masks static areas to prevent 'swimming' textures on background. Lower (0.3) is safer."}),
                 
-                # --- Advanced Model Params ---
+                # --- 7. Efficiency & Advanced ---
+                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Create shortcuts to images instead of copying them. Saves massive disk space."}),
                 "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Color learning rate."}),
                 "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.01, "step": 0.00001, "tooltip": "Scale/Rotation learning rate."}),
                 
-                # --- Custom Output ---
+                # --- 8. Output ---
                 "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Absolute path to save PLY files. e.g. D:/MyProject/Splats"}),
                 "filename_prefix": ("STRING", {"default": "FreeFlow_Splat", "multiline": False, "tooltip": "Prefix for output filenames."}),
-                "cleanup_work_dirs": ("BOOLEAN", {"default": True, "tooltip": "Delete temporary training folders training."}),
+                "cleanup_work_dirs": ("BOOLEAN", {"default": True, "label": "Auto-Delete Work Folders", "tooltip": "Delete large intermediate folders (frame_XXXX_work) after export. Recommended."}),
+                
+                # --- 9. Distributed Training ---
+                "distributed_anchor": ("BOOLEAN", {"default": False, "tooltip": "Enable Distributed Training Mode. Saves/Loads consistent anchor frames across machines."}),
+                "distributed_anchor_path": ("STRING", {"default": "", "multiline": False, "placeholder": "path/to/anchor.ply (Empty = Auto)", "tooltip": "Force initialization from specific file. If Empty, looks for 'anchor_frame_{N}.ply' in Distributed_Anchor folder."}),
+                "distributed_anchor_frame": ("STRING", {"default": "", "multiline": False, "placeholder": "Frame Number e.g. 0 (Empty = First Frame)", "tooltip": "Which frame acts as the Anchor? If Empty, defaults to the first frame of THIS batch."}),
+                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 1000, "tooltip": "Process N frames without saving. Use for Overlap in Dynamic Distributed mode to avoid overwriting files."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -355,7 +356,9 @@ class FreeFlow_AdaptiveEngine:
                    opacity_reset_interval=5000, densify_grad_threshold=0.0002, use_symlinks=True,
                    frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3, 
                    feature_lr=0.0025, gaussian_lr=0.00016,
-                   custom_output_path="", filename_prefix="FreeFlow", cleanup_work_dirs=True, unique_id=None, preview_camera_filter=""):
+                   custom_output_path="", filename_prefix="FreeFlow", cleanup_work_dirs=True, 
+                   distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
+                   unique_id=None, preview_camera_filter=""):
         """
         Execute adaptive training pipeline.
         Frame 0: Initialize from sparse cloud (if enabled)
@@ -432,6 +435,18 @@ class FreeFlow_AdaptiveEngine:
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
 
+        target_anchor_id = indices_to_process[0] # Default: First frame of THIS batch
+        if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
+             target_anchor_id = int(distributed_anchor_frame.strip())
+             # Priority: If target anchor is in our list, move it to FRONT
+             if target_anchor_id in indices_to_process:
+                 indices_to_process.remove(target_anchor_id)
+                 indices_to_process.insert(0, target_anchor_id)
+                 print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue to generate Anchor.")
+        
+        auto_anchor_filename = f"anchor_frame_{target_anchor_id}.ply"
+        # -------------------------
+
         for idx, i in enumerate(indices_to_process):
             frame_work_dir = output_dir / f"frame_{i:04d}_work"
             ply_out = output_dir / f"{filename_prefix}_frame_{i:04d}.ply"
@@ -442,12 +457,39 @@ class FreeFlow_AdaptiveEngine:
                 mask_engine, prev_images_paths, masking_method 
             )
             
-            # -- PARTIAL WARM START (Inject points3D from prev frame) --
+            # -- INITIALIZATION STRATEGY --
+            # Priority 1: Warm Start (Previous Frame in this batch) -- Sequential Continuity
+            # Priority 2: Distributed Anchor (If specified/found & No Prev Frame) -- Distributed Continuity
+            # Priority 3: Sparse Cloud (Default) -- Single Machine Start
+            
+            sparse_target = frame_work_dir / "sparse" / "0"
+            init_source_ply = None
+            init_mode = "Sparse"
+
+            # 1. Check Warm Start
             if prev_ply and prev_ply.exists():
-                sparse_target = frame_work_dir / "sparse" / "0"
-                converted_ok = self._convert_ply_to_points3d(prev_ply, sparse_target / "points3D.ply")
+                init_source_ply = prev_ply
+                init_mode = "Warm Start"
+            
+            # 2. Check Distributed Anchor (Only if NOT warm starting)
+            elif distributed_anchor:
+                 # Check Path OR Auto-File
+                 anchor_file = None
+                 if distributed_anchor_path and Path(distributed_anchor_path).exists():
+                     anchor_file = Path(distributed_anchor_path)
+                 elif (output_dir / "Distributed_Anchor" / auto_anchor_filename).exists():
+                     anchor_file = output_dir / "Distributed_Anchor" / auto_anchor_filename
+                 
+                 if anchor_file:
+                     init_source_ply = anchor_file
+                     init_mode = f"Distributed Anchor ({anchor_file.name})"
+            
+            # Perform Initialization Override
+            if init_source_ply:
+                converted_ok = self._convert_ply_to_points3d(init_source_ply, sparse_target / "points3D.ply")
                 if converted_ok:
-                     pass # FreeFlowUtils.log(f"Frame {i}: Warm-Started from {prev_ply.name}")
+                    print(f"   🚀 Initializing Frame {i} from {init_mode}") # FreeFlowUtils.log not imported? use print
+            pass # Spacer
             
             # Build Brush command (Only use supported flags)
             # Brush CLI: brush <PATH> --export-path --export-name --total-steps --lr-opac
@@ -599,8 +641,34 @@ class FreeFlow_AdaptiveEngine:
             # Output check
             if not ply_out.exists():
                 raise RuntimeError(f"Brush failed to generate output: {ply_out}")
-                
-            prev_ply = ply_out
+
+            # --- DISTRIBUTED: Save Anchor ---
+            # Save IF: Distributed Enabled AND Current Frame is the Target Anchor
+            if distributed_anchor and i == target_anchor_id and ply_out.exists():
+                distributed_dir = output_dir / "Distributed_Anchor"
+                distributed_dir.mkdir(exist_ok=True)
+                anchor_dst = distributed_dir / auto_anchor_filename
+                import shutil
+                shutil.copy(str(ply_out), str(anchor_dst))
+                print(f"   ⚓ Saved Distributed Anchor to: {anchor_dst}")
+
+            # --- WARMUP LOGIC ---
+            # If warmup, move result to temp folder to avoid cluttering main output
+            is_warmup = (idx < warmup_frames)
+            # Force keep if it's the anchor (we usually want the anchor frame in the sequence)
+            if distributed_anchor and i == target_anchor_id:
+                is_warmup = False
+            
+            if is_warmup:
+                 warmup_dir = output_dir / "_warmup_temp"
+                 warmup_dir.mkdir(exist_ok=True)
+                 warmup_path = warmup_dir / ply_out.name
+                 import shutil
+                 shutil.move(str(ply_out), str(warmup_path))
+                 prev_ply = warmup_path
+                 print(f"   🔥 Warmup: Moved Frame {i} to temp storage.")
+            else:
+                 prev_ply = ply_out
 
 
 
