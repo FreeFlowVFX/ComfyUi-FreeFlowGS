@@ -68,7 +68,7 @@ class FreeFlow_ColmapAnchor:
                 # --- SIFT Extraction Options ---
                 "sift_estimate_affine_shape": ("BOOLEAN", {"default": False, "tooltip": "Enable for wide-baseline matching (big camera angles)."}),
                 "sift_domain_size_pooling": ("BOOLEAN", {"default": False, "tooltip": "Improves feature detection stability."}),
-                "sift_use_gpu": ("BOOLEAN", {"default": FreeFlowUtils.get_os() == "Windows", "tooltip": "Use GPU for SIFT. Faster but requires NVIDIA GPU."}),
+                # "sift_use_gpu": REMOVED in 3.13. Auto-detected.
                 # --- Matching Options ---
                 "matching_method": (["Exhaustive", "Sequential", "Retrieval (FAISS)", "Spatial"], {"default": "Exhaustive", "tooltip": "Exhaustive = Best. Sequential = Video. Retrieval (FAISS) = Fast (Auto-Downloads Index). Spatial = GPS (Requires Metadata)."}),
                 "sift_guided_matching": ("BOOLEAN", {"default": False, "tooltip": "Refine matches using geometry. Slow but accurate."}),
@@ -227,7 +227,7 @@ class FreeFlow_ColmapAnchor:
         preset = self.QUALITY_PRESETS.get(quality, self.QUALITY_PRESETS["High"])
         
         model = params.get("camera_model", "OPENCV")
-        use_gpu = params.get("sift_use_gpu", True)
+        # use_gpu = params.get("sift_use_gpu", True) # Deprecated in 3.13
         
         cmd = [
             str(colmap_bin), "feature_extractor",
@@ -247,12 +247,10 @@ class FreeFlow_ColmapAnchor:
             cmd.extend(["--SiftExtraction.domain_size_pooling", "1"])
 
         # GPU Flag logic (Standard COLMAP vs others)
-        # Mac Homebrew/Standard binaries often lack CUDA support AND the flag itself.
-        # Passing --SiftExtraction.use_gpu=0 throws error "unrecognised option" on some builds.
-        # So we ONLY pass this flag if we are on Windows or explicitly requested by user (via override?)
-        # For now, safer to only pass it on Windows.
-        if FreeFlowUtils.get_os() == "Windows":
-             cmd.extend(["--SiftExtraction.use_gpu", "1" if use_gpu else "0"])
+        # COLMAP 3.13 Windows seems to reject '--SiftExtraction.use_gpu' (unrecognised option).
+        # We assume 3.13 defaults to GPU if available. Removing explicit flag to prevent crash.
+        # if FreeFlowUtils.get_os() == "Windows":
+        #      cmd.extend(["--SiftExtraction.use_gpu", "1" if use_gpu else "0"])
         
         return cmd
 
