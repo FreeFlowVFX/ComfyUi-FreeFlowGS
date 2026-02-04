@@ -23,8 +23,13 @@ BRUSH_URL_WIN = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRU
 BRUSH_URL_MAC = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-aarch64-apple-darwin.tar.xz"
 BRUSH_URL_LINUX = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-x86_64-unknown-linux-gnu.tar.xz"
 
-COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.11.1/colmap-x64-windows-cuda.zip"
-VOCAB_TREE_URL = "https://cvg-data.inf.ethz.ch/colmap/vocab_tree_flickr100K_words_32K.bin"
+COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.12.0/colmap-x64-windows-cuda.zip"
+# VOCAB TREE MIRRORS (Try in order) - FAISS VERSION FOR COLMAP 3.12+
+VOCAB_TREE_MIRRORS = [
+    "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words32K.bin",
+    "https://demuc.de/colmap/vocab_tree_faiss_flickr100K_words32K.bin", 
+    "https://cvg-data.inf.ethz.ch/colmap/vocab_tree_faiss_flickr100K_words32K.bin",
+]
 
 class FreeFlowUtils:
     @staticmethod
@@ -176,25 +181,59 @@ class FreeFlowUtils:
                  print(f"Warning: Could not make {path} executable: {e}")
 
     @staticmethod
-    def install_brush():
+    def get_local_version(tool_name):
+        """Reads installed version from bin/versions.json"""
+        import json
+        v_file = FreeFlowUtils.get_bin_dir() / "versions.json"
+        if not v_file.exists(): return None
+        try:
+            with open(v_file, 'r') as f:
+                data = json.load(f)
+                return data.get(tool_name)
+        except: return None
+
+    @staticmethod
+    def save_local_version(tool_name, version):
+        """Updates bin/versions.json"""
+        import json
+        bin_dir = FreeFlowUtils.get_bin_dir()
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        v_file = bin_dir / "versions.json"
+        
+        data = {}
+        if v_file.exists():
+            try:
+                with open(v_file, 'r') as f: data = json.load(f)
+            except: pass
+        
+        data[tool_name] = version
+        with open(v_file, 'w') as f:
+            json.dump(data, f, indent=4)
+
+    @staticmethod
+    def install_brush(version=BRUSH_VERSION):
         bin_dir = FreeFlowUtils.get_bin_dir()
         bin_dir.mkdir(parents=True, exist_ok=True)
         
         system = FreeFlowUtils.get_os()
+        # Dynamic URL Construction
         if system == "Windows":
-            url = BRUSH_URL_WIN
+            url = f"https://github.com/ArthurBrussee/brush/releases/download/v{version}/brush-app-x86_64-pc-windows-msvc.zip"
             archive_path = bin_dir / "brush.zip"
         elif system == "Darwin":
-            url = BRUSH_URL_MAC
+            url = f"https://github.com/ArthurBrussee/brush/releases/download/v{version}/brush-app-aarch64-apple-darwin.tar.xz"
             archive_path = bin_dir / "brush.tar.xz"
         else:
-            url = BRUSH_URL_LINUX
+            url = f"https://github.com/ArthurBrussee/brush/releases/download/v{version}/brush-app-x86_64-unknown-linux-gnu.tar.xz"
             archive_path = bin_dir / "brush.tar.xz"
+            
+        FreeFlowUtils.log(f"Installing Brush v{version}...")
             
         if FreeFlowUtils.download_file(url, archive_path):
             if FreeFlowUtils.extract_archive(archive_path, bin_dir):
                 # Cleanup archive
-                archive_path.unlink()
+                try: archive_path.unlink() 
+                except: pass
                 
                 # Verify extraction
                 if system == "Windows":
@@ -219,87 +258,37 @@ class FreeFlowUtils:
                     
                     if brush_bin and brush_bin.exists():
                         FreeFlowUtils.ensure_executable(brush_bin)
+                
+                # SAVE VERSION
+                FreeFlowUtils.save_local_version("brush", version)
                 return True
         return False
-
-    @staticmethod
-    def _fetch_github_version(repo_name):
-        """Fetches 'tag_name' from GitHub Releases API."""
-        import json
-        url = f"https://api.github.com/repos/{repo_name}/releases/latest"
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
-            with urllib.request.urlopen(req, timeout=3) as response:
-                if response.status == 200:
-                    data = json.loads(response.read())
-                    return data.get("tag_name", "").lstrip("v")
-        except Exception:
-            pass # Fail silently on network errors
-        return None
-
-    @staticmethod
-    def _fetch_npm_version(package_name):
-        """Fetches latest version from npm registry API."""
-        import json
-        url = f"https://registry.npmjs.org/{package_name}/latest"
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
-            with urllib.request.urlopen(req, timeout=3) as response:
-                if response.status == 200:
-                    data = json.loads(response.read())
-                    return data.get("version", "")
-        except Exception:
-            pass # Fail silently on network errors
-        return None
-
-    @staticmethod
-    def check_updates():
-        """Spawns a thread to check for updates without blocking startup."""
-        def run_check():
-            # Check Brush
-            latest_brush = FreeFlowUtils._fetch_github_version(BRUSH_REPO)
-            if latest_brush and latest_brush != BRUSH_VERSION:
-                print(f"\n🌊 \033[93m[Update Available] Brush v{latest_brush} is out! (Current: v{BRUSH_VERSION})\033[0m")
-                print(f"   See: https://github.com/{BRUSH_REPO}/releases\n")
-            
-            # Check gsplat.js npm package
-            latest_gsplat = FreeFlowUtils._fetch_npm_version("gsplat")
-            if latest_gsplat and latest_gsplat != GSPLAT_VERSION:
-                print(f"\n🌊 \033[93m[Update Available] gsplat.js v{latest_gsplat} is out! (Current: v{GSPLAT_VERSION})\033[0m")
-                print(f"   Update GSPLAT_VERSION in utils.py and player.js to benefit from improvements.\n")
-            
-            # Check Colmap (Just as a notification, since we rely on 3.11.1 specifically)
-            latest_colmap = FreeFlowUtils._fetch_github_version(COLMAP_REPO)
-            # We don't have a COLMAP_VERSION constant; skipping active notification.
         
-        # Run in thread
-        import threading
-        t = threading.Thread(target=run_check)
-        t.daemon = True
-        t.start()
-
-
-
     @staticmethod
-    def install_colmap():
+    def install_colmap(version="3.12.0"):
         # ONLY SUPPORTED FOR WINDOWS AUTO-INSTALL
         if FreeFlowUtils.get_os() != "Windows":
              FreeFlowUtils.log("Auto-Installation of COLMAP is only supported on Windows.", "WARN")
              return False
 
-
         bin_dir = FreeFlowUtils.get_bin_dir()
         bin_dir.mkdir(parents=True, exist_ok=True)
         
-        url = COLMAP_URL_WIN
+        # Dynamic URL
+        url = f"https://github.com/colmap/colmap/releases/download/{version}/colmap-x64-windows-cuda.zip"
         archive_path = bin_dir / "colmap.zip"
+        
+        FreeFlowUtils.log(f"Installing COLMAP {version}...")
         
         if FreeFlowUtils.download_file(url, archive_path):
             if FreeFlowUtils.extract_archive(archive_path, bin_dir):
-                archive_path.unlink()
+                try: archive_path.unlink()
+                except: pass
                 # Windows COLMAP zip extracts to a folder named "COLMAP-3.10-windows-cuda" or similar
                 # We need to find it and maybe flatten it or update logic?
                 # Actually, simplest is to let it sit there and find it dynamically.
+                
+                FreeFlowUtils.save_local_version("colmap", version)
                 return True
         return False
 
@@ -356,37 +345,66 @@ class FreeFlowUtils:
         bin_dir = FreeFlowUtils.get_bin_dir()
         bin_dir.mkdir(parents=True, exist_ok=True)
         
-        target_path = bin_dir / "vocab_tree_flickr100K_words_32K.bin"
+        target_path = bin_dir / "vocab_tree_faiss_flickr100K_words32K.bin"
         if target_path.exists():
             return True
             
-        if FreeFlowUtils.download_file(VOCAB_TREE_URL, target_path):
-            FreeFlowUtils.log("Vocabulary Tree downloaded successfully.")
-            return True
-        return False
+        success = False
+        for url in VOCAB_TREE_MIRRORS:
+            FreeFlowUtils.log(f"Attempting download from: {url}")
+            if FreeFlowUtils.download_file(url, target_path):
+                FreeFlowUtils.log("Vocabulary Tree downloaded successfully.")
+                success = True
+                break
+            else:
+                FreeFlowUtils.log(f"Mirror failed. Trying next...", "WARN")
+                
+        if not success:
+             FreeFlowUtils.log("ALL Mirrors failed. Please download 'vocab_tree_faiss_flickr100K_words32K.bin' manually and place in: " + str(bin_dir), "ERROR")
+        
+        return success
         
     @staticmethod
     def get_vocab_tree_path():
         bin_dir = FreeFlowUtils.get_bin_dir()
-        path = bin_dir / "vocab_tree_flickr100K_words_32K.bin"
+        path = bin_dir / "vocab_tree_faiss_flickr100K_words32K.bin"
         if path.exists():
             return path
         return None
 
     @staticmethod
     def check_and_install():
-        """Automatically checks for binaries and installs if missing."""
+        """Automatically checks for binaries, installs if missing, AND updates if available."""
         print("🌊 Checking FreeFlow dependencies...")
         
-        # Check Brush
+        # 1. CHECK BRUSH
+        brush_ver = FreeFlowUtils.get_local_version("brush")
+        latest_brush = FreeFlowUtils._fetch_github_version(BRUSH_REPO) # e.g. "0.4.0"
+        
+        # Logic: If missing OR (installed_ver != latest_ver and latest is valid)
         if not FreeFlowUtils.get_binary_path("brush"):
             print("   • Brush binary missing. Auto-Installing...")
-            FreeFlowUtils.install_brush()
+            target_ver = latest_brush if latest_brush else BRUSH_VERSION
+            FreeFlowUtils.install_brush(target_ver)
+        elif latest_brush and brush_ver != latest_brush:
+            print(f"   • 🌊 Update Found: Brush ({brush_ver} -> {latest_brush}). Auto-Updating...")
+            FreeFlowUtils.install_brush(latest_brush)
         
-        # Check Colmap (Windows only for auto-install)
-        if FreeFlowUtils.get_os() == "Windows" and not FreeFlowUtils.get_binary_path("colmap"):
-             print("   • COLMAP binary missing. Auto-Installing...")
-             FreeFlowUtils.install_colmap()
+        # 2. CHECK COLMAP (Windows Only)
+        if FreeFlowUtils.get_os() == "Windows":
+            colmap_ver = FreeFlowUtils.get_local_version("colmap")
+            if not colmap_ver: colmap_ver = "Unknown"
+            
+            # Fetch latest COLMAP (Note: Releases might be "3.12.0" or "dev")
+            latest_colmap = FreeFlowUtils._fetch_github_version(COLMAP_REPO)
+            
+            if not FreeFlowUtils.get_binary_path("colmap"):
+                 print("   • COLMAP binary missing. Auto-Installing...")
+                 if latest_colmap: FreeFlowUtils.install_colmap(latest_colmap)
+                 else: FreeFlowUtils.install_colmap() # Uses default
+            elif latest_colmap and colmap_ver != latest_colmap:
+                 print(f"   • 🌊 Update Found: COLMAP ({colmap_ver} -> {latest_colmap}). Auto-Updating...")
+                 FreeFlowUtils.install_colmap(latest_colmap)
 
         # Check FFmpeg
         if not FreeFlowUtils.get_binary_path("ffmpeg"):
