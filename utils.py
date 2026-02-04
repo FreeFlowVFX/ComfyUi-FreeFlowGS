@@ -288,6 +288,7 @@ class FreeFlowUtils:
              return False
 
 
+        bin_dir = FreeFlowUtils.get_bin_dir()
         bin_dir.mkdir(parents=True, exist_ok=True)
         
         url = COLMAP_URL_WIN
