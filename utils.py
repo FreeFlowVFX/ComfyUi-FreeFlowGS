@@ -265,6 +265,58 @@ class FreeFlowUtils:
         return False
         
     @staticmethod
+    def _fetch_github_version(repo_name):
+        """Fetches 'tag_name' from GitHub Releases API."""
+        import json
+        url = f"https://api.github.com/repos/{repo_name}/releases/latest"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                if response.status == 200:
+                    data = json.loads(response.read())
+                    return data.get("tag_name", "").lstrip("v")
+        except Exception:
+            pass # Fail silently on network errors
+        return None
+
+    @staticmethod
+    def _fetch_npm_version(package_name):
+        """Fetches latest version from npm registry API."""
+        import json
+        url = f"https://registry.npmjs.org/{package_name}/latest"
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                if response.status == 200:
+                    data = json.loads(response.read())
+                    return data.get("version", "")
+        except Exception:
+            pass # Fail silently on network errors
+        return None
+
+    @staticmethod
+    def check_updates():
+        """Spawns a thread to check for updates without blocking startup."""
+        def run_check():
+            # Check Brush
+            latest_brush = FreeFlowUtils._fetch_github_version(BRUSH_REPO)
+            if latest_brush and latest_brush != BRUSH_VERSION:
+                print(f"\\n🌊 \\033[93m[Update Available] Brush v{latest_brush} is out! (Current: v{BRUSH_VERSION})\\033[0m")
+                print(f"   See: https://github.com/{BRUSH_REPO}/releases\\n")
+            
+            # Check gsplat.js npm package
+            latest_gsplat = FreeFlowUtils._fetch_npm_version("gsplat")
+            if latest_gsplat and latest_gsplat != GSPLAT_VERSION:
+                print(f"\\n🌊 \\033[93m[Update Available] gsplat.js v{latest_gsplat} is out! (Current: v{GSPLAT_VERSION})\\033[0m")
+                print(f"   Update GSPLAT_VERSION in utils.py and player.js to benefit from improvements.\\n")
+        
+        # Run in thread
+        import threading
+        t = threading.Thread(target=run_check)
+        t.daemon = True
+        t.start()
+
+    @staticmethod
     def install_colmap(version="3.12.0"):
         # ONLY SUPPORTED FOR WINDOWS AUTO-INSTALL
         if FreeFlowUtils.get_os() != "Windows":
