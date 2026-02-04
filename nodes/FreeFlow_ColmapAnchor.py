@@ -70,7 +70,7 @@ class FreeFlow_ColmapAnchor:
                 "sift_domain_size_pooling": ("BOOLEAN", {"default": False, "tooltip": "Improves feature detection stability."}),
                 "sift_use_gpu": ("BOOLEAN", {"default": FreeFlowUtils.get_os() == "Windows", "tooltip": "Use GPU for SIFT. Faster but requires NVIDIA GPU."}),
                 # --- Matching Options ---
-                "matching_method": (["Exhaustive", "Sequential", "VocabTree", "Spatial"], {"default": "Exhaustive", "tooltip": "Exhaustive = Best. Sequential = Video. VocabTree = Fast (Auto-Downloads 150MB file). Spatial = GPS (Requires Metadata)."}),
+                "matching_method": (["Exhaustive", "Sequential", "Retrieval (FAISS)", "Spatial"], {"default": "Exhaustive", "tooltip": "Exhaustive = Best. Sequential = Video. Retrieval (FAISS) = Fast (Auto-Downloads Index). Spatial = GPS (Requires Metadata)."}),
                 "sift_guided_matching": ("BOOLEAN", {"default": False, "tooltip": "Refine matches using geometry. Slow but accurate."}),
                 # --- Mapper Settings ---
                 "mapper_ba_tolerance": ("FLOAT", {"default": 1e-5, "min": 1e-8, "max": 0.1, "step": 1e-6, "tooltip": "Bundle Adjustment tolerance. Lower (1e-6) = tighter alignment."}),
