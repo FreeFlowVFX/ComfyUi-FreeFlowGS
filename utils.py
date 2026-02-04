@@ -23,7 +23,7 @@ BRUSH_URL_WIN = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRU
 BRUSH_URL_MAC = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-aarch64-apple-darwin.tar.xz"
 BRUSH_URL_LINUX = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-x86_64-unknown-linux-gnu.tar.xz"
 
-COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.12.0/colmap-x64-windows-cuda.zip"
+COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.13.0/colmap-x64-windows-cuda.zip"
 # VOCAB TREE MIRRORS (Try in order) - FAISS VERSION FOR COLMAP 3.12+
 VOCAB_TREE_MIRRORS = [
     "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words32K.bin",
@@ -317,7 +317,7 @@ class FreeFlowUtils:
         t.start()
 
     @staticmethod
-    def install_colmap(version="3.12.0"):
+    def install_colmap(version="3.13.0"):
         # ONLY SUPPORTED FOR WINDOWS AUTO-INSTALL
         if FreeFlowUtils.get_os() != "Windows":
              FreeFlowUtils.log("Auto-Installation of COLMAP is only supported on Windows.", "WARN")

@@ -223,30 +223,30 @@ class FreeFlow_ColmapAnchor:
 
     def _build_extraction_cmd(self, colmap_bin, database_path, images_dir, params):
         """Build feature extraction command with all user parameters."""
-        quality = params.get("quality", "Medium")
-        preset = self.QUALITY_PRESETS.get(quality, self.QUALITY_PRESETS["Medium"])
+        quality = params.get("quality", "High")
+        preset = self.QUALITY_PRESETS.get(quality, self.QUALITY_PRESETS["High"])
+        
+        model = params.get("camera_model", "OPENCV")
+        use_gpu = params.get("sift_use_gpu", True)
         
         cmd = [
             str(colmap_bin), "feature_extractor",
             "--database_path", str(database_path),
             "--image_path", str(images_dir),
-            "--ImageReader.camera_model", params.get("camera_model", "PINHOLE"),
+            "--ImageReader.camera_model", model,
         ]
         
-        # Apply quality preset
-        for key, value in preset.items():
-            cmd.extend([f"--{key}", str(value)])
-        
-        # SIFT options
+        # SIFT Options
+        for key, val in preset.items():
+            cmd.extend([f"--{key}", str(val)])
+            
         if params.get("sift_estimate_affine_shape", False):
             cmd.extend(["--SiftExtraction.estimate_affine_shape", "1"])
-        
+            
         if params.get("sift_domain_size_pooling", False):
             cmd.extend(["--SiftExtraction.domain_size_pooling", "1"])
-        
-        # GPU usage - Conditional Check
-        use_gpu = params.get("sift_use_gpu", True)
-        
+
+        # GPU Flag logic (Standard COLMAP vs others)
         # Mac Homebrew/Standard binaries often lack CUDA support AND the flag itself.
         # Passing --SiftExtraction.use_gpu=0 throws error "unrecognised option" on some builds.
         # So we ONLY pass this flag if we are on Windows or explicitly requested by user (via override?)
@@ -263,7 +263,8 @@ class FreeFlow_ColmapAnchor:
         method_map = {
             "Exhaustive": "exhaustive_matcher",
             "Sequential": "sequential_matcher",
-            "VocabTree": "vocab_tree_matcher",
+            "VocabTree": "vocab_tree_matcher", # Legacy fallback
+            "Retrieval (FAISS)": "vocab_tree_matcher", # Modern mapping
             "Spatial": "spatial_matcher",
         }
         
@@ -284,8 +285,8 @@ class FreeFlow_ColmapAnchor:
             cmd.extend(["--SequentialMatching.overlap", "10"])
             # Loop closure? Maybe too advanced for now. Use Exhaustive for full closure.
 
-        # VocabTree Options
-        if method == "VocabTree":
+        # VocabTree / Retrieval Options
+        if method == "VocabTree" or method == "Retrieval (FAISS)":
              vocab_path = FreeFlowUtils.get_vocab_tree_path()
              if not vocab_path:
                  # Attempt download just in case check failed upstream
