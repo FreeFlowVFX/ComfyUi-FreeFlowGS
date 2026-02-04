@@ -24,7 +24,7 @@ BRUSH_URL_MAC = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRU
 BRUSH_URL_LINUX = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-x86_64-unknown-linux-gnu.tar.xz"
 
 COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.11.1/colmap-x64-windows-cuda.zip"
-VOCAB_TREE_URL = "https://demuc.de/colmap/vocab_tree_flickr100K_words_32K.bin"
+VOCAB_TREE_URL = "https://cvg-data.inf.ethz.ch/colmap/vocab_tree_flickr100K_words_32K.bin"
 
 class FreeFlowUtils:
     @staticmethod
