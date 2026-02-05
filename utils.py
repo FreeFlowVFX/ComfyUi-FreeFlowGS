@@ -469,7 +469,7 @@ class FreeFlowUtils:
     @staticmethod
     def install_python_packages():
         """Checks and installs critical python dependencies."""
-        required = ["scikit-image", "numpy", "scipy"]
+        required = ["scikit-image", "numpy", "scipy", "mediapipe"]
         import importlib.util
         import subprocess
         
@@ -489,6 +489,18 @@ class FreeFlowUtils:
                 print("   • Installed successfully.")
             except Exception as e:
                 FreeFlowUtils.log(f"Failed to pip install {missing}: {e}", "ERROR")
+
+        # Force MediaPipe Version Check (Fix for v0.10.21 breaking legacy API)
+        try:
+            import mediapipe
+            # Pin to 0.10.14 which supports Python 3.12 AND keeps mp.solutions
+            TARGET_MP_VERSION = "0.10.14" 
+            if mediapipe.__version__ != TARGET_MP_VERSION:
+                print(f"   • 🌊 Enforcing MediaPipe v{TARGET_MP_VERSION} (Current: {mediapipe.__version__} is unstable/breaking).")
+                print("     Re-installing correct version...")
+                subprocess.check_call([sys.executable, "-m", "pip", "install", f"mediapipe=={TARGET_MP_VERSION}"])
+        except Exception as e:
+            pass # Module not found yet, will be caught next startup or handled above
 
     @staticmethod
     def get_binary_path(binary_name):

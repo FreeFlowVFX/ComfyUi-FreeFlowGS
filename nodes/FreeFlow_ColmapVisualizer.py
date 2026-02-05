@@ -167,6 +167,9 @@ class FreeFlow_ColmapVisualizer:
                 "colorize_by_error": ("BOOLEAN", {"default": False}),
                 "max_points": ("INT", {"default": 100000, "min": 1000, "max": 500000}),
                 "frustum_scale": ("FLOAT", {"default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01}),
+                "camera_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+                "point_size": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 20.0, "step": 0.1}),
+                "auto_center": ("BOOLEAN", {"default": True, "tooltip": "Automatically center view on content when loaded"}),
             }
         }
 
@@ -176,7 +179,7 @@ class FreeFlow_ColmapVisualizer:
     CATEGORY = "FreeFlow"
     OUTPUT_NODE = True
 
-    def visualize(self, colmap_data, colorize_by_error=False, max_points=100000, frustum_scale=0.1):
+    def visualize(self, colmap_data, colorize_by_error=False, max_points=100000, frustum_scale=0.1, camera_scale=1.0, point_size=1.0, auto_center=True):
         """
         Parse COLMAP binary files and prepare visualization data.
         """

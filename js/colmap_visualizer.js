@@ -313,16 +313,6 @@ function createVisualizerWidget(node) {
         startLoop() {
             if (this.animationFrameId) return;
             const animate = () => {
-                // VISIBILITY SAFETY CHECK
-                // If minimized, force hide and STOP loop to verify minimization works
-                if (node.flags.collapsed) {
-                    if (this.element && this.element.style.display !== 'none') {
-                        this.element.style.display = 'none';
-                    }
-                    this.animationFrameId = null;
-                    return; // Stop loop
-                }
-
                 if (this.element && this.element.style.display !== 'none') {
                     if (this.renderer && this.scene && this.camera) {
                         this.controls.update();

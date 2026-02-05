@@ -9,6 +9,7 @@ import subprocess
 import os
 import sys
 import re
+import struct
 import threading
 import numpy as np
 import scipy.signal
@@ -45,47 +46,47 @@ class FreeFlow_AdaptiveEngine:
             },
             "optional": {
                 # --- 2. Visualization & Monitoring ---
-                "visualize_training": (["Off", "Save Preview Images", "Spawn Native GUI"], {"default": "Off", "tooltip": "Visual feedback. 'Save Preview Images' renders snapshots. 'Spawn Native GUI' opens Brush app."}),
-                "preview_interval": ("INT", {"default": 500, "min": 100, "max": 5000, "tooltip": "Step interval for previews/updates."}),
-                "preview_camera_filter": ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. cam01 (Empty = Show All/Latest)", "tooltip": "Filter preview to specific camera name."}),
-                "eval_camera_index": ("INT", {"default": 10, "min": 1, "max": 100, "tooltip": "[Preview Mode Only] Render every Nth camera for preview. E.g. if you have 16 cameras: 1 = all cameras, 8 = cam0 + cam8, 15 = cam0 + cam15."}),
+                "visualize_training": (["Off", "Save Preview Images", "Spawn Native GUI"], {"default": "Off", "tooltip": "Visual feedback during training. 'Off' runs silently. 'Save Preview Images' renders snapshots to disk. 'Spawn Native GUI' opens the Brush app window for real-time viewing."}),
+                "preview_interval": ("INT", {"default": 500, "min": 100, "max": 5000, "tooltip": "How often to capture preview images (in training steps). Lower = more frequent updates but slower training."}),
+                "preview_camera_filter": ("STRING", {"default": "", "multiline": False, "placeholder": "e.g. cam01 (Empty = Show All/Latest)", "tooltip": "Filter preview output to a specific camera by name. Leave empty to show all cameras or the latest available."}),
+                "eval_camera_index": ("INT", {"default": 10, "min": 1, "max": 100, "tooltip": "Render every Nth camera for preview. With 16 cameras: 1=all, 8=cam0+cam8. Higher values = faster previews."}),
 
                 # --- 3. Topology Control ---
-                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Fixed Mode prevents adding/removing points after Frame 0. Eliminate flickering for smooth video."}),
-                "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay filtering to output. REQUIRES Fixed Topology."}),
+                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
+                "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay temporal filter to smooth point positions across frames. Eliminates jitter. REQUIRES Fixed Topology mode."}),
                 
                 # --- 4. Core Model Parameters ---
-                "splat_count": ("INT", {"default": 50000, "min": 1000, "max": 10000000, "tooltip": "Total number of Gaussians to maintain. Higher = more detail but slower/heavier."}),
-                "sh_degree": ("INT", {"default": 3, "min": 0, "max": 3, "tooltip": "Spherical Harmonics degree. 3 = View dependent colors (High Quality). 0 = Diffuse only (Fast/Stable)."}),
-                "iterations": ("INT", {"default": 10000, "min": 1000, "max": 50000, "tooltip": "Steps per frame. Higher (10k+) reduces flicker but takes longer."}),
+                "splat_count": ("INT", {"default": 500000, "min": 1000, "max": 10000000, "tooltip": "Maximum number of Gaussian splats. Higher = more detail but slower rendering. 500k is good for film, 100k for previews."}),
+                "sh_degree": ("INT", {"default": 3, "min": 0, "max": 3, "tooltip": "Spherical Harmonics degree controls view-dependent effects. 3=full specular/reflections (best quality). 0=flat diffuse colors (faster, more stable)."}),
+                "iterations": ("INT", {"default": 30000, "min": 1000, "max": 100000, "tooltip": "Training steps per frame. More steps = higher quality and less flicker. 30k is good for production, 5k-10k for testing."}),
                 
                 # --- 5. Advanced Optimization ---
-                "learning_rate": ("FLOAT", {"default": 0.0005, "min": 0.0001, "max": 0.05, "step": 0.00001, "tooltip": "Position Learning Rate. Lower (0.0005) is more stable/smooth. Higher is faster but jittery."}),
-                "densification_interval": ("INT", {"default": 300, "min": 10, "max": 1000, "tooltip": "How often to split/clone gaussians. Higher (300) = more stable structure."}),
-                "opacity_reset_interval": ("INT", {"default": 5000, "min": 100, "max": 10000, "tooltip": "Reset opacity to cull faint blobs. Set high (5000) for temporal stability."}),
-                "densify_grad_threshold": ("FLOAT", {"default": 0.0002, "min": 0.00001, "max": 0.01, "step": 0.00001, "tooltip": "Threshold for adding new points. Lower = more detail."}),
+                "learning_rate": ("FLOAT", {"default": 0.00002, "min": 0.000001, "max": 0.001, "step": 0.000001, "tooltip": "Controls how fast point POSITIONS update. Lower = smoother, more stable results. Higher = faster convergence but may overshoot."}),
+                "densification_interval": ("INT", {"default": 200, "min": 10, "max": 1000, "tooltip": "How often to add/remove points (refinement). Lower = more aggressive point growth. Higher = more conservative, stable topology."}),
+                "opacity_reset_interval": ("INT", {"default": 5000, "min": 100, "max": 50000, "tooltip": "Periodically reset opacity to remove faint/invisible splats. Higher = more stable across frames. Lower = cleaner individual frames."}),
+                "densify_grad_threshold": ("FLOAT", {"default": 0.00004, "min": 0.000001, "max": 0.01, "step": 0.000001, "tooltip": "Gradient threshold to trigger point splitting. Lower = add more points (finer detail). Higher = fewer points (faster, coarser)."}),
                 
                 # --- 6. Initialization & Selection ---
-                "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Frames to process. e.g. '0, 5, 10-20' or 'all'."}),
-                "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize Frame 0 from COLMAP point cloud. Essential for correct scale/orientation."}),
-                "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "Optical Flow (Robust)", "tooltip": "Method for calculating motion mask. 'Optical Flow' is best for videos. 'Simple Diff' is faster but flickers."}),
-                "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "Masks static areas to prevent 'swimming' textures on background. Lower (0.3) is safer."}),
+                "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
+                "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize first frame from COLMAP sparse point cloud. Essential for correct 3D scale and camera alignment. Only disable for testing."}),
+                "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "Optical Flow (Robust)", "tooltip": "How to detect motion between frames. Optical Flow: accurate but slower. Simple Diff: fast but may flicker on subtle motion."}),
+                "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "How aggressively to mask static areas. 0=no masking. 1=mask everything static. 0.3 is safe default to prevent background 'swimming'."}),
                 
                 # --- 7. Efficiency & Advanced ---
-                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Create shortcuts to images instead of copying them. Saves massive disk space."}),
-                "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Color learning rate."}),
-                "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.01, "step": 0.00001, "tooltip": "Scale/Rotation learning rate."}),
+                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Use filesystem links instead of copying images. Saves gigabytes of disk space. Disable if you have permission issues on Windows."}),
+                "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
+                "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Set very low (0.00016) for stable geometry. Higher values cause wobbling between frames."}),
                 
                 # --- 8. Output ---
-                "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Absolute path to save PLY files. e.g. D:/MyProject/Splats"}),
-                "filename_prefix": ("STRING", {"default": "FreeFlow_Splat", "multiline": False, "tooltip": "Prefix for output filenames."}),
-                "cleanup_work_dirs": ("BOOLEAN", {"default": True, "label": "Auto-Delete Work Folders", "tooltip": "Delete large intermediate folders (frame_XXXX_work) after export. Recommended."}),
+                "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Custom folder for PLY output. Leave empty to use ComfyUI output folder. Use absolute path like D:/Project/Splats."}),
+                "filename_prefix": ("STRING", {"default": "FreeFlow_Splat", "multiline": False, "tooltip": "Prefix for output PLY filenames. Result: {prefix}_frame_0001.ply, {prefix}_frame_0002.ply, etc."}),
+                "cleanup_work_dirs": ("BOOLEAN", {"default": True, "label": "Auto-Delete Work Folders", "tooltip": "Delete temporary work folders after each frame. Saves disk space. Disable to keep intermediate files for debugging."}),
                 
                 # --- 9. Distributed Training ---
-                "distributed_anchor": ("BOOLEAN", {"default": False, "tooltip": "Enable Distributed Training Mode. Saves/Loads consistent anchor frames across machines."}),
-                "distributed_anchor_path": ("STRING", {"default": "", "multiline": False, "placeholder": "path/to/anchor.ply (Empty = Auto)", "tooltip": "Force initialization from specific file. If Empty, looks for 'anchor_frame_{N}.ply' in Distributed_Anchor folder."}),
-                "distributed_anchor_frame": ("STRING", {"default": "", "multiline": False, "placeholder": "Frame Number e.g. 0 (Empty = First Frame)", "tooltip": "Which frame acts as the Anchor? If Empty, defaults to the first frame of THIS batch."}),
-                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 1000, "tooltip": "Process N frames without saving. Use for Overlap in Dynamic Distributed mode to avoid overwriting files."}),
+                "distributed_anchor": ("BOOLEAN", {"default": False, "tooltip": "Enable for multi-machine rendering. Saves Frame 0 as shared anchor so all machines start from identical point cloud."}),
+                "distributed_anchor_path": ("STRING", {"default": "", "multiline": False, "placeholder": "path/to/anchor.ply (Empty = Auto)", "tooltip": "Path to load a pre-trained anchor PLY. Leave empty to auto-generate from Frame 0. Use for consistent multi-machine runs."}),
+                "distributed_anchor_frame": ("STRING", {"default": "", "multiline": False, "placeholder": "Frame Number e.g. 0 (Empty = First Frame)", "tooltip": "Which frame number to use as anchor. Leave empty to use the first frame in your selection."}),
+                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 1000, "tooltip": "Train N frames without saving output. Use for overlapping frame ranges in distributed mode to ensure smooth transitions."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -96,106 +97,45 @@ class FreeFlow_AdaptiveEngine:
     CATEGORY = "FreeFlow"
     OUTPUT_NODE = True
 
-    def _extract_frame_numbers(self, multicam_feed):
-        """
-        Extract numeric frame IDs from the camera with the most frames.
-        Returns a list of ints.
-        """
-        if not multicam_feed:
-            return []
-            
-        # Find camera with maximum frames to ensure we get the full range
-        # (Handles cases where some cameras might be missing frames if not synced)
-        best_cam = max(multicam_feed, key=lambda k: len(multicam_feed[k]))
-        file_paths = multicam_feed[best_cam]
-        
-        frame_nums = []
-        import re
-        
-        for fp in file_paths:
-            fname = Path(fp).stem
-            # Find all digit sequences
-            matches = re.findall(r'\d+', fname)
-            if matches:
-                # Use the LAST sequence of digits as the frame number
-                frame_nums.append(int(matches[-1]))
-            else:
-                # Fallback: Sequential index if no digits found
-                frame_nums.append(len(frame_nums))
-                
-        # Debug Log
-        if frame_nums:
-             print(f"DEBUG: Extracted frame numbers from '{best_cam}' (Range: {frame_nums[0]} - {frame_nums[-1]})")
-        else:
-             print(f"DEBUG: Failed to extract frame numbers from '{best_cam}'")
-             
-        return frame_nums
-
-    def _parse_frames(self, frame_str, available_frames):
-        """
-        Parse string for frame INDICES based on real frame NUMBERS.
-        frame_str: e.g. '0', '100-200', 'all'
-        available_frames: list of actual frame numbers present in input [195, 196, 197...]
-        
-        Returns: LIST of INDICES (0-based) to process from the input array.
-        """
+    def _parse_frames(self, frame_str, max_frames):
+        """Parse string for frame indices (e.g. '0', '0-10', '1,5,10', 'all')."""
         frame_str = str(frame_str).lower().strip()
-        max_idx = len(available_frames)
         
-        if frame_str == "all" or frame_str == "*":
-            return list(range(max_idx))
+        if frame_str == "all":
+            return list(range(max_frames))
             
-        # Map FrameNum -> List of Indices (handle duplicates if any, though unlikely)
-        # But mostly we iterate available_frames and check if they match criteria
-        
         indices = set()
         parts = frame_str.split(',')
-        
-        # Prepare a set of requested frames for O(1) lookup ?? 
-        # No, ranges make that hard. We verify each available frame against the request.
-        
-        # Actually, simpler: Parse request into a set/ranges of Desired Numbers.
-        # Then filter available_frames.
-        
-        # Step 1: Parse request into list of desired integers
-        desired_frames = set()
-        # Keep track of ranges to check
-        ranges = []
         
         for part in parts:
             part = part.strip()
             if not part: continue
             
             if '-' in part:
-                 try:
-                    s, e = map(int, part.split('-'))
-                    ranges.append((s, e))
-                 except: 
-                    FreeFlowUtils.log(f"Invalid range: {part}", "WARN")
+                # Range: "start-end"
+                try:
+                    start, end = map(int, part.split('-'))
+                    # Inclusive range
+                    for i in range(start, end + 1):
+                        if 0 <= i < max_frames:
+                            indices.add(i)
+                except ValueError:
+                    FreeFlowUtils.log(f"Invalid frame range format: {part}", "WARN")
             else:
-                 try:
-                    desired_frames.add(int(part))
-                 except: pass
-                 
-        # Step 2: Find indices where frame_num matches
-        final_indices = []
-        for idx, frame_num in enumerate(available_frames):
-            match = False
-            if frame_num in desired_frames:
-                match = True
-            else:
-                for (s, e) in ranges:
-                    if s <= frame_num <= e:
-                        match = True
-                        break
+                # Single index
+                try:
+                    i = int(part)
+                    if 0 <= i < max_frames:
+                        indices.add(i)
+                except ValueError:
+                    FreeFlowUtils.log(f"Invalid frame index: {part}", "WARN")
+                    
+        sorted_indices = sorted(list(indices))
+        if not sorted_indices:
+            FreeFlowUtils.log("No valid frames selected. Defaulting to all.", "WARN")
+            return list(range(max_frames))
             
-            if match:
-                final_indices.append(idx)
-                
-        if not final_indices:
-             FreeFlowUtils.log(f"Warning: No frames matched selection '{frame_str}' in available frames {available_frames[:5]}...", "WARN")
-             
-        return sorted(final_indices)
+        return sorted_indices
 
     def _export_sparse_to_ply(self, sparse_dir, output_ply):
         """
@@ -207,8 +147,6 @@ class FreeFlow_AdaptiveEngine:
             return None
         
         try:
-            import struct
-            
             with open(points_file, "rb") as f:
                 num_points = struct.unpack("<Q", f.read(8))[0]
                 
@@ -425,9 +363,6 @@ class FreeFlow_AdaptiveEngine:
         Frame 0: Initialize from sparse cloud (if enabled)
         Frame 1+: Warm-start from previous frame's output
         """
-        import shutil
-        import threading
-        
         # 1. Setup Output Directory
         if custom_output_path and custom_output_path.strip():
             # Handle "~" expansion for Home directory
@@ -458,29 +393,13 @@ class FreeFlow_AdaptiveEngine:
         cameras = list(multicam_feed.keys())
         total_frames = max(len(multicam_feed[cam]) for cam in cameras)
         
-        # --- REAL FRAME MAPPING ---
-        # Extract actual frame numbers from filenames (e.g. 195, 196...)
-        all_frame_numbers = self._extract_frame_numbers(multicam_feed)
-        if len(all_frame_numbers) != total_frames:
-             # Fallback if mismatch (shouldn't happen if uniform)
-             all_frame_numbers = list(range(total_frames))
-
-        # PARSE FRAME SELECTION (Pass REAL numbers)
-        # Returns indices (0-based) into the multicam_feed arrays
-        indices_to_process = self._parse_frames(frame_selection, all_frame_numbers)
+        # PARSE FRAME SELECTION
+        indices_to_process = self._parse_frames(frame_selection, total_frames)
         
         FreeFlowUtils.log("=" * 50)
         FreeFlowUtils.log("FreeFlow Adaptive Engine - Starting 4D Generation")
         FreeFlowUtils.log(f"Cameras: {len(cameras)} | Total Frames: {total_frames}")
-        
-        # Log range of actual frames
-        if indices_to_process:
-             first_id = all_frame_numbers[indices_to_process[0]]
-             last_id = all_frame_numbers[indices_to_process[-1]]
-             FreeFlowUtils.log(f"Processing {len(indices_to_process)} frames. (indices: {len(indices_to_process)})")
-        else:
-             FreeFlowUtils.log("No frames selected!", "WARN")
-             
+        FreeFlowUtils.log(f"Selected Frames: {len(indices_to_process)} ({indices_to_process})")
         FreeFlowUtils.log("=" * 50)
 
         # COLMAP Anchor Path
@@ -515,41 +434,23 @@ class FreeFlow_AdaptiveEngine:
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
 
-        # --- DISTRIBUTED PRIORITY LOGIC (Updated for Real IDs) ---
-        # Default: First frame of THIS batch
-        target_anchor_id = all_frame_numbers[indices_to_process[0]] if indices_to_process else 0
-        
+        target_anchor_id = indices_to_process[0] # Default: First frame of THIS batch
         if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
-             target_anchor_input = int(distributed_anchor_frame.strip())
-             
-             # Check if this Desired ID exists in our process queue
-             # mapped_id = all_frame_numbers[feed_idx]
-             
-             found_queue_idx = -1
-             for qg_idx, feed_idx in enumerate(indices_to_process):
-                  if all_frame_numbers[feed_idx] == target_anchor_input:
-                       found_queue_idx = qg_idx
-                       break
-             
-             if found_queue_idx != -1:
-                  # Move to front
-                  feed_idx = indices_to_process.pop(found_queue_idx)
-                  indices_to_process.insert(0, feed_idx)
-                  target_anchor_id = target_anchor_input
-                  print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue.")
+             target_anchor_id = int(distributed_anchor_frame.strip())
+             # Priority: If target anchor is in our list, move it to FRONT
+             if target_anchor_id in indices_to_process:
+                 indices_to_process.remove(target_anchor_id)
+                 indices_to_process.insert(0, target_anchor_id)
+                 print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue to generate Anchor.")
         
         auto_anchor_filename = f"anchor_frame_{target_anchor_id}.ply"
         # -------------------------
 
         for idx, i in enumerate(indices_to_process):
-            # i is the FEED INDEX (0-based array index)
-            # real_frame_id is the actual number (e.g. 195)
-            real_frame_id = all_frame_numbers[i]
+            frame_work_dir = output_dir / f"frame_{i:04d}_work"
+            ply_out = output_dir / f"{filename_prefix}_frame_{i:04d}.ply"
             
-            frame_work_dir = output_dir / f"frame_{real_frame_id:04d}_work"
-            ply_out = output_dir / f"{filename_prefix}_frame_{real_frame_id:04d}.ply"
-            
-            # Prepare folder structure (Use 'i' for array access)
+            # Prepare folder structure
             active_cams = self._prepare_brush_folder(
                 frame_work_dir, multicam_feed, i, anchor_sparse, filename_map, use_symlinks,
                 mask_engine, prev_images_paths, masking_method 
@@ -586,7 +487,7 @@ class FreeFlow_AdaptiveEngine:
             if init_source_ply:
                 converted_ok = self._convert_ply_to_points3d(init_source_ply, sparse_target / "points3D.ply")
                 if converted_ok:
-                    print(f"   🚀 Initializing Frame {real_frame_id} from {init_mode}") # FreeFlowUtils.log not imported? use print
+                    print(f"   🚀 Initializing Frame {i} from {init_mode}") # FreeFlowUtils.log not imported? use print
             pass # Spacer
             
             # Build Brush command (Only use supported flags)
@@ -620,16 +521,19 @@ class FreeFlow_AdaptiveEngine:
             # If Cinema-Smooth Mode enabled AND not the first processed frame (anchor)
             if is_fixed_topology and idx > 0:
                 # Force Freeze Topology: disable refinement and growth
-                # We use --refine_every > total_steps to globally disable structural changes.
+                # VALID Brush CLI flags (verified from brush --help):
+                #   --growth-stop-iter: "Period after which splat growth stops"
+                #   --refine-every: "Frequency of refinement where gaussians are replaced and densified"
+                
                 cmd.extend([
-                    "--refine_every", "999999",
-                    "--opacity_reset_interval", "999999", 
+                    "--growth-stop-iter", "0",     # Stop adding points immediately (no growth)
+                    "--refine-every", "999999",    # Disable refinement (no split/clone/replace)
                 ])
-                print(f"   🔒 [Fixed Topology] Frame {real_frame_id}: Topology Locked (Strict Frozen Mode)")
+                print(f"   🔒 [Fixed Topology] Frame {i}: Topology Locked (Strict Frozen Mode)")
             
             # Execute training with Real-time Parsing
             frame_pct = ((idx + 1) / len(indices_to_process)) * 100
-            FreeFlowUtils.log(f"🎬 Frame {idx+1}/{len(indices_to_process)} ({frame_pct:.1f}% global) - Training frame index {real_frame_id}...")
+            FreeFlowUtils.log(f"🎬 Frame {idx+1}/{len(indices_to_process)} ({frame_pct:.1f}% global) - Training frame index {i}...")
             
             # Force unbuffered python output for the subprocess if possible
             env = os.environ.copy()
@@ -659,7 +563,7 @@ class FreeFlow_AdaptiveEngine:
             
             # Pass reference to self so simulator can update cached speed
             # Also pass visualization mode for file-based progress
-            frame_name = f"{filename_prefix}_frame_{real_frame_id:04d}"
+            frame_name = f"{filename_prefix}_frame_{i:04d}"
             pbar_thread = threading.Thread(
                 target=self._pbar_simulator, 
                 args=(pbar, iterations, seconds_per_step, current_step_global, process, idx == 0, visualize_training, frame_name)
@@ -737,11 +641,10 @@ class FreeFlow_AdaptiveEngine:
 
             # --- DISTRIBUTED: Save Anchor ---
             # Save IF: Distributed Enabled AND Current Frame is the Target Anchor
-            if distributed_anchor and real_frame_id == target_anchor_id and ply_out.exists():
+            if distributed_anchor and i == target_anchor_id and ply_out.exists():
                 distributed_dir = output_dir / "Distributed_Anchor"
                 distributed_dir.mkdir(exist_ok=True)
                 anchor_dst = distributed_dir / auto_anchor_filename
-                import shutil
                 shutil.copy(str(ply_out), str(anchor_dst))
                 print(f"   ⚓ Saved Distributed Anchor to: {anchor_dst}")
 
@@ -749,17 +652,16 @@ class FreeFlow_AdaptiveEngine:
             # If warmup, move result to temp folder to avoid cluttering main output
             is_warmup = (idx < warmup_frames)
             # Force keep if it's the anchor (we usually want the anchor frame in the sequence)
-            if distributed_anchor and real_frame_id == target_anchor_id:
+            if distributed_anchor and i == target_anchor_id:
                 is_warmup = False
             
             if is_warmup:
                  warmup_dir = output_dir / "_warmup_temp"
                  warmup_dir.mkdir(exist_ok=True)
                  warmup_path = warmup_dir / ply_out.name
-                 import shutil
                  shutil.move(str(ply_out), str(warmup_path))
                  prev_ply = warmup_path
-                 print(f"   🔥 Warmup: Moved Frame {real_frame_id} to temp storage.")
+                 print(f"   🔥 Warmup: Moved Frame {i} to temp storage.")
             else:
                  prev_ply = ply_out
 
@@ -903,9 +805,6 @@ class FreeFlow_AdaptiveEngine:
         # Mixed types (float, uint8) makes simple view hard.
         # But we only need to touch the first 3 floats of every stride.
         
-        import numpy as np
-        import scipy.signal
-        
         # We will iterate and build the array. 
         # (Using a structured array might be faster but tricky with unknown schema)
         
@@ -985,9 +884,6 @@ class FreeFlow_AdaptiveEngine:
         Handling both 'float' and 'uchar' properties for robust stride calculation.
         """
         try:
-             import struct
-             import re
-             
              with open(ply_path, "rb") as f:
                  header = b""
                  # Use readline to strictly consume complete lines including newlines
@@ -1134,7 +1030,6 @@ class FreeFlow_AdaptiveEngine:
         Helper task to monitor and organize previews for a specific training process.
         Running in a thread, so it must be robust.
         """
-        import shutil
         from server import PromptServer
         
         last_img_time = 0
@@ -1176,7 +1071,6 @@ class FreeFlow_AdaptiveEngine:
                         parent_name = cand.parent.name # eval_500
                         
                         # --- EXTRACT STEP NUMBER for progress tracking ---
-                        import re
                         step_match = re.search(r'eval_(\d+)', parent_name)
                         if step_match:
                             step_num = int(step_match.group(1))

@@ -77,32 +77,43 @@ try:
     from .nodes.FreeFlow_SmartGridMonitor import FreeFlow_SmartGridMonitor
     from .nodes.FreeFlow_ColmapAnchor import FreeFlow_ColmapAnchor
     from .nodes.FreeFlow_ColmapVisualizer import FreeFlow_ColmapVisualizer
-    from .nodes.FreeFlow_AdaptiveEngine import FreeFlow_AdaptiveEngine
+    from .nodes.FreeFlow_3DVisualizer import FreeFlow_3DVisualizer
     from .nodes.FreeFlow_AdaptiveEngine import FreeFlow_AdaptiveEngine
     from .nodes.FreeFlow_InteractivePlayer import FreeFlow_InteractivePlayer
     from .nodes.FreeFlow_PLYSequenceLoader import FreeFlow_PLYSequenceLoader
     from .nodes.FreeFlow_PostProcessSmoother import FreeFlow_PostProcessSmoother
+    from .nodes.FreeFlow_GS_Engine import FreeFlow_GS_Engine
+    from .nodes.FreeFlow_FlameTracker import FreeFlow_FlameTracker
+    from .nodes.FreeFlow_MeshLoader import FreeFlow_MeshLoader
 
     NODE_CLASS_MAPPINGS = {
         "FreeFlow_MultiCamLoader": FreeFlow_MultiCamLoader,
         "FreeFlow_SmartGridMonitor": FreeFlow_SmartGridMonitor,
         "FreeFlow_ColmapAnchor": FreeFlow_ColmapAnchor,
         "FreeFlow_ColmapVisualizer": FreeFlow_ColmapVisualizer,
+        "FreeFlow_3DVisualizer": FreeFlow_3DVisualizer,
         "FreeFlow_AdaptiveEngine": FreeFlow_AdaptiveEngine,
         "FreeFlow_InteractivePlayer": FreeFlow_InteractivePlayer,
         "FreeFlow_PLYSequenceLoader": FreeFlow_PLYSequenceLoader,
-        "FreeFlow_PostProcessSmoother": FreeFlow_PostProcessSmoother
+        "FreeFlow_PostProcessSmoother": FreeFlow_PostProcessSmoother,
+        "FreeFlow_GS_Engine": FreeFlow_GS_Engine,
+        "FreeFlow_FlameTracker": FreeFlow_FlameTracker,
+        "FreeFlow_MeshLoader": FreeFlow_MeshLoader
     }
 
     NODE_DISPLAY_NAME_MAPPINGS = {
         "FreeFlow_MultiCamLoader": "FreeFlow Multi-Camera Loader",
         "FreeFlow_SmartGridMonitor": "FreeFlow Smart Grid Monitor",
         "FreeFlow_ColmapAnchor": "FreeFlow COLMAP Anchor",
-        "FreeFlow_ColmapVisualizer": "FreeFlow COLMAP 3D Visualizer",
+        "FreeFlow_ColmapVisualizer": "FreeFlow COLMAP 3D Visualizer (Legacy)",
+        "FreeFlow_3DVisualizer": "FreeFlow 3D Visualizer",
         "FreeFlow_AdaptiveEngine": "FreeFlow 4D Adaptive Engine",
         "FreeFlow_InteractivePlayer": "FreeFlow 4D Player",
         "FreeFlow_PLYSequenceLoader": "FreeFlow PLY Sequence Loader",
-        "FreeFlow_PostProcessSmoother": "FreeFlow Post-Process Smoother (Savitzky-Golay)"
+        "FreeFlow_PostProcessSmoother": "FreeFlow Post-Process Smoother (Savitzky-Golay)",
+        "FreeFlow_GS_Engine": "FreeFlow GS Engine (Cinema)",
+        "FreeFlow_FlameTracker": "FreeFlow 3D/Face Tracker (Auto-Rig)",
+        "FreeFlow_MeshLoader": "FreeFlow External Mesh Loader (Metahuman)"
     }
 
 except Exception as e:
