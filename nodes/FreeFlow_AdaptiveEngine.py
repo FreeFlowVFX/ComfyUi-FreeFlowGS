@@ -620,15 +620,10 @@ class FreeFlow_AdaptiveEngine:
             # If Cinema-Smooth Mode enabled AND not the first processed frame (anchor)
             if is_fixed_topology and idx > 0:
                 # Force Freeze Topology: disable refinement and growth
-                # Brush uses 'refinement' to handle splitting/pruning.
-                # Setting --refine-every to > total_steps disables it.
-                # Setting --growth-stop-iter to 0 disables growth mechanisms.
-                
+                # We use --refine_every > total_steps to globally disable structural changes.
                 cmd.extend([
-                    "--densify_from_iter", "999999",
-                    "--densify_until_iter", "0",
-                    "--prune_from_iter", "999999",
-                    "--opacity_reset_interval", "999999",
+                    "--refine_every", "999999",
+                    "--opacity_reset_interval", "999999", 
                 ])
                 print(f"   🔒 [Fixed Topology] Frame {real_frame_id}: Topology Locked (Strict Frozen Mode)")
             
