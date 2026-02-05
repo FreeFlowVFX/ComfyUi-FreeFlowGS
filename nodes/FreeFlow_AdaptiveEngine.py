@@ -702,24 +702,22 @@ class FreeFlow_AdaptiveEngine:
         """
         Applies Savitzky-Golay filtering to the positions of the sequence.
         ONLY works for Fixed Topology mode where point count is constant.
+        SAVES to a 'smoothed' subfolder to preserve original trained files.
         """
         if not indices: return
         
-        # 1. Load all PLY positions
-        # Memory intense? A standard 50k splat is ~4MB. 100 frames = 400MB. Fine.
-        # But parsing PLY in python is slow. We just need XYZ.
+        # Create smoothed output folder (preserve originals!)
+        smoothed_dir = output_dir / "smoothed"
+        smoothed_dir.mkdir(exist_ok=True)
+        FreeFlowUtils.log(f"   📁 Smoothed output will be saved to: {smoothed_dir}")
         
-        # We need a robustPLY reader. Re-using part of _convert logic or a simpler one?
-        # Let's try to do it efficiently using numpy memmap or struct if possible.
-        # But standard struct is safer.
-        
-        # Actually implementing here to avoid "pass" placeholder issues
-        
-        # Collect file paths
-        ply_files = [output_dir / f"{prefix}_frame_{i:04d}.ply" for i in indices]
+        # Source PLY files (originals - read only)
+        source_files = [output_dir / f"{prefix}_frame_{i:04d}.ply" for i in indices]
+        # Destination PLY files (smoothed folder)
+        output_files = [smoothed_dir / f"{prefix}_frame_{i:04d}.ply" for i in indices]
         
         # Check first file to get vertex count and header size
-        first_ply = ply_files[0]
+        first_ply = source_files[0]
         if not first_ply.exists(): return
         
         # Helper to get header size and offsets
@@ -765,7 +763,7 @@ class FreeFlow_AdaptiveEngine:
         # Load all data
         all_data = [] # List of bytearrays (mutable)
         
-        for p in ply_files:
+        for p in source_files:
             if not p.exists():
                 all_data.append(None)
                 continue
@@ -868,10 +866,10 @@ class FreeFlow_AdaptiveEngine:
             
             np.copyto(target_bytes, new_uint8)
             
-            # Save file
-            path = ply_files[t]
-            if path:
-                with open(path, "wb") as f:
+            # Save file to SMOOTHED folder (preserve originals!)
+            output_path = output_files[t]
+            if output_path:
+                with open(output_path, "wb") as f:
                     f.write(data)
                     
         return True
