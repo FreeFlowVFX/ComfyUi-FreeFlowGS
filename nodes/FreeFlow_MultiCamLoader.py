@@ -10,6 +10,7 @@ class FreeFlow_MultiCamLoader:
         return {
             "required": {
                 "directory_path": ("STRING", {"default": "C:/Projects/MyCapture"}),
+                "frame_range": ("STRING", {"default": "*", "multiline": False, "placeholder": "e.g. 0-100, 0,10,20, or * (All)"}),
             },
         }
 
@@ -18,21 +19,45 @@ class FreeFlow_MultiCamLoader:
     FUNCTION = "load_cameras"
     CATEGORY = "FreeFlow"
 
-    def load_cameras(self, directory_path):
+    def load_cameras(self, directory_path, frame_range="*"):
+        import re
+        from ..utils import FreeFlowUtils # Import inside function to avoid circular deps if any
+
         root = Path(directory_path)
         if not root.exists():
             raise FileNotFoundError(f"Directory not found: {directory_path}")
 
-        # Find camera subfolders (assume alphanumeric sort acts as ID)
-        # Looking for folders that might contain images. 
-        # Heuristic: any folder that is not named 'sparse' or 'database'
-        # Or stricter: folders starting with 'cam' or just all folders.
-        # User prompt example: "cam01/, cam02/"
+        # --- Helper for parsing ranges (Reused from PLY Loader) ---
+        def parse_frame_range(fr_str):
+            fr = fr_str.strip()
+            if fr == "*" or fr.lower() == "all" or not fr:
+                return None # None means ALL
+            
+            allowed = set()
+            try:
+                parts = fr.split(",")
+                for p in parts:
+                    p = p.strip()
+                    if "-" in p:
+                        r_parts = p.split("-")
+                        if len(r_parts) == 2:
+                            start = int(r_parts[0])
+                            end = int(r_parts[1])
+                            allowed.update(range(start, end + 1))
+                    else:
+                        allowed.add(int(p))
+                return allowed
+            except ValueError:
+                FreeFlowUtils.log(f"Invalid frame range '{fr_str}'. Loading ALL.", "WARN")
+                return None
+
+        allowed_frames = parse_frame_range(frame_range)
         
-        # Strategy: Scan ALL subdirectories.
-        # Any subdirectory containing images is treated as a camera.
-        # We exclude specific known non-camera folders (outputs, system folders).
-        
+        def extract_frame_num(p):
+            nums = re.findall(r'\d+', p.stem)
+            return int(nums[-1]) if nums else -1
+
+        # --- Scan Folders ---
         ignored_folders = {
             "sparse", "dense", "database", "colmap_out", "output", "__macosx", 
             "checkpoints", "logs", "config", "freeflow_colmap", "images"
@@ -41,7 +66,6 @@ class FreeFlow_MultiCamLoader:
         valid_extensions = {".jpg", ".jpeg", ".png", ".exr", ".tif", ".tiff", ".bmp", ".webp"}
         multicam_data = {}
         
-        # 1. Iterate over all items in root
         all_subdirs = sorted([f for f in root.iterdir() if f.is_dir()])
         
         for folder in all_subdirs:
@@ -53,16 +77,23 @@ class FreeFlow_MultiCamLoader:
                            if img.is_file() and img.suffix.lower() in valid_extensions])
             
             if images:
-                # Valid Camera found
-                multicam_data[folder.name] = [str(img.absolute()) for img in images]
-                # print(f"DEBUG: Found camera {folder.name} with {len(images)} frames.")
-            else:
-                # print(f"DEBUG: Skipping {folder.name} (No images).")
-                pass
-
+                # Apply Frame Filter
+                if allowed_frames is not None:
+                    filtered_images = []
+                    for img in images:
+                        num = extract_frame_num(img)
+                        if num != -1 and num in allowed_frames:
+                            filtered_images.append(img)
+                    images = filtered_images
+                
+                if images:
+                    multicam_data[folder.name] = [str(img.absolute()) for img in images]
+        
         if not multicam_data:
-             print(f"DEBUG: No valid camera folders found in {root}.")
-             raise ValueError(f"No camera subfolders with images found in {directory_path}")
+             print(f"DEBUG: No valid camera folders found in {root} (Range: {frame_range}).")
+             # Don't crash, just warn? Or crash if critical? 
+             # For logic flow, crashing is safer if essential input.
+             raise ValueError(f"No matching images found in {directory_path} with range '{frame_range}'")
 
         # Validate consistency (Soft check)
         max_frames = 0

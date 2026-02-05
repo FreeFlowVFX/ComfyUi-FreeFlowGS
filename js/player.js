@@ -1299,6 +1299,12 @@ class FreeFlow4DPlayer {
         // Update UI
         this.scrubber.value = idx;
         const total = this.frames.length;
+
+        // DEBUG: Check files
+        if (idx === 0 && this.sequenceData && this.sequenceData.files) {
+            console.log("Player Debug: First File:", this.sequenceData.files[0]);
+        }
+
         // Correctly use Real Frame Number during Playback
         const real = this.getRealFrameNumber(idx);
         this.frameLabel.innerText = `${real} (${idx + 1}/${total})`;
@@ -1704,12 +1710,10 @@ class FreeFlow4DPlayer {
     getRealFrameNumber(index) {
         if (!this.sequenceData || !this.sequenceData.files || !this.sequenceData.files[index]) return index + 1;
         const filename = this.sequenceData.files[index];
-        const match = filename.match(/(\d+)(?=\.\w+$)/); // Match last number before extension
-        if (match) return parseInt(match[1]);
 
-        // Fallback: Try any number in string?
-        const matchAny = filename.match(/(\d+)/g);
-        if (matchAny && matchAny.length > 0) return parseInt(matchAny[matchAny.length - 1]);
+        // Robust extraction: Find the LAST sequence of digits in the string
+        const match = filename.match(/(\d+)(?!.*\d)/);
+        if (match) return parseInt(match[1], 10);
 
         return index + 1;
     }
