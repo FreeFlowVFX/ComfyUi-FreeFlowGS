@@ -96,7 +96,18 @@ jobs:
           DISTUTILS_USE_SDK: "1"
         run: |
           Write-Host "=== Cloning gsplat v${{ github.event.inputs.gsplat_version }} from GitHub ==="
-          git clone --depth 1 --branch v${{ github.event.inputs.gsplat_version }} https://github.com/nerfstudio-project/gsplat.git gsplat_src
+          git clone --depth 1 --branch v${{ github.event.inputs.gsplat_version }} --recurse-submodules https://github.com/nerfstudio-project/gsplat.git gsplat_src
+          
+          Write-Host ""
+          Write-Host "=== Verifying glm submodule ==="
+          if (Test-Path "gsplat_src/gsplat/cuda/csrc/third_party/glm/glm") {
+            Write-Host "glm submodule found!"
+          } else {
+            Write-Host "glm submodule missing, initializing..."
+            cd gsplat_src
+            git submodule update --init --recursive
+            cd ..
+          }
           
           Write-Host ""
           Write-Host "=== Building gsplat with CUDA extensions ==="
