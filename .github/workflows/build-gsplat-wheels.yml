@@ -1,15 +1,13 @@
 # Build pre-compiled gsplat wheels for Windows ONLY
 #
 # Why Windows only:
-# - Linux: gsplat team provides pre-built wheels (no need to duplicate)
+# - Linux: gsplat team provides pre-built wheels on PyPI
 # - macOS: gsplat requires CUDA which doesn't exist on Mac
 # - Windows: NO pre-built wheels exist, and MSVC is required for JIT compilation
 #
-# Why this matters for 4D Gaussian Splatting:
-# - Splatfacto supports checkpoint/warm-start (Frame N+1 trains from Frame N's state)
-# - This creates temporally coherent 4D Gaussian Splats with smooth transitions
-# - Brush engine does NOT support warm-start, so Splatfacto is critical for 4D
-# - gsplat is required by Splatfacto for GPU-accelerated Gaussian rasterization
+# CRITICAL: gsplat uses JIT compilation by default. To create a wheel with
+# pre-compiled CUDA kernels, we must install gsplat (triggers compilation),
+# then repackage the site-packages folder including the compiled .pyd files.
 
 name: Build gsplat Wheels
 
@@ -21,9 +19,9 @@ on:
         required: true
         default: '1.5.3'
       torch_version:
-        description: 'PyTorch version (e.g., 2.4.0)'
+        description: 'PyTorch version (e.g., 2.5.1)'
         required: true
-        default: '2.4.0'
+        default: '2.5.1'
       cuda_version:
         description: 'CUDA version for wheel suffix'
         required: true
@@ -77,7 +75,7 @@ jobs:
       - name: Install PyTorch with CUDA
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install torch==${{ github.event.inputs.torch_version }} torchvision --index-url https://download.pytorch.org/whl/${{ github.event.inputs.cuda_version }}
+          python -m pip install torch==${{ github.event.inputs.torch_version }} --index-url https://download.pytorch.org/whl/${{ github.event.inputs.cuda_version }}
 
       - name: Verify PyTorch CUDA
         run: |
@@ -87,15 +85,90 @@ jobs:
         run: |
           python -m pip install ninja cmake
 
-      - name: Build gsplat wheel
+      - name: Install gsplat from source (triggers CUDA compilation)
         env:
           TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
           CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          MAX_JOBS: "4"
         run: |
-          python -m pip wheel gsplat==${{ github.event.inputs.gsplat_version }} --no-deps --wheel-dir ./dist
+          echo "Installing gsplat from source with CUDA compilation..."
+          python -m pip install gsplat==${{ github.event.inputs.gsplat_version }} -v --no-build-isolation
+          echo "Installation complete!"
 
-      - name: List built wheels
-        run: dir dist
+      - name: Verify gsplat compiled correctly
+        run: |
+          python -c "import gsplat; print(f'gsplat version: {gsplat.__version__}')"
+          python -c "import gsplat; print(f'gsplat path: {gsplat.__path__}')"
+          dir "%LOCALAPPDATA%\torch_extensions" /s /b 2>nul || echo "No torch_extensions cache"
+        shell: cmd
+
+      - name: List gsplat package contents
+        shell: pwsh
+        run: |
+          $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
+          Write-Host "gsplat installed at: $gsplat_path"
+          Get-ChildItem -Path $gsplat_path -Recurse | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Create wheel from installed package
+        shell: pwsh
+        run: |
+          # Get site-packages path
+          $site_packages = python -c "import site; print(site.getsitepackages()[0])"
+          $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
+          
+          Write-Host "Site packages: $site_packages"
+          Write-Host "gsplat path: $gsplat_path"
+          
+          # Check for .pyd files (compiled extensions)
+          $pyd_files = Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd"
+          if ($pyd_files) {
+            Write-Host "Found compiled .pyd files:"
+            $pyd_files | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Host "WARNING: No .pyd files found in gsplat package!"
+            # Check torch_extensions cache
+            $cache_path = "$env:LOCALAPPDATA\torch_extensions"
+            if (Test-Path $cache_path) {
+              Write-Host "Checking torch_extensions cache..."
+              Get-ChildItem -Path $cache_path -Recurse -Filter "*.pyd" | ForEach-Object { Write-Host "  $_" }
+            }
+          }
+          
+          # Create wheel directory
+          New-Item -ItemType Directory -Force -Path dist
+          
+          # Use pip to create wheel from the installed package directory
+          python -m pip wheel "$gsplat_path" --no-deps --wheel-dir ./dist
+          
+          # List created wheels
+          Write-Host "Created wheels:"
+          Get-ChildItem -Path dist -Filter "*.whl" | ForEach-Object { Write-Host "  $_" }
+
+      - name: Rename wheel with platform tags
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter "*.whl" | Select-Object -First 1
+          if (-not $wheel) {
+            Write-Error "No wheel found!"
+            exit 1
+          }
+          
+          $cuda_ver = "${{ github.event.inputs.cuda_version }}"
+          $py_ver = "${{ matrix.python-version }}"
+          $new_name = "gsplat-${{ github.event.inputs.gsplat_version }}-py${py_ver}-${cuda_ver}.whl"
+          
+          Write-Host "Renaming $($wheel.Name) to $new_name"
+          Rename-Item $wheel.FullName -NewName $new_name
+          
+          # Verify
+          Get-ChildItem -Path dist -Filter "*.whl"
+
+      - name: Inspect wheel contents
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem -Path dist -Filter "*.whl" | Select-Object -First 1
+          Write-Host "Wheel contents:"
+          python -m zipfile -l $wheel.FullName
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -119,7 +192,15 @@ jobs:
           merge-multiple: true
 
       - name: List downloaded wheels
-        run: ls -la wheels/
+        run: |
+          echo "Downloaded wheels:"
+          ls -la wheels/
+          echo ""
+          echo "Inspecting wheel contents:"
+          for whl in wheels/*.whl; do
+            echo "=== $whl ==="
+            python3 -m zipfile -l "$whl" | grep -E "\.pyd|\.so|csrc" || echo "  (no compiled extensions found)"
+          done
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -129,24 +210,24 @@ jobs:
           body: |
             ## Pre-compiled gsplat ${{ github.event.inputs.gsplat_version }} wheels for Windows
             
-            **Why Windows only:**
-            - Linux wheels are provided by the gsplat team
-            - macOS is not supported (gsplat requires CUDA)
-            - Windows has NO pre-built wheels, and requires MSVC for compilation
-            
-            **Why Splatfacto matters for 4D Gaussian Splatting:**
-            - Splatfacto supports **checkpoint/warm-start training**
-            - Frame N+1 continues from Frame N's trained state
-            - This creates **temporally coherent** 4D Gaussian Splats
-            - Brush engine does NOT support this
-            
-            **Included wheels:**
+            **Built with:**
             - PyTorch ${{ github.event.inputs.torch_version }}
             - CUDA ${{ github.event.inputs.cuda_version }}
             - Python 3.11 and 3.12
+            - CUDA architectures: 7.0, 7.5, 8.0, 8.6, 8.9, 9.0 (RTX 20xx through 40xx)
+            
+            **Why these wheels exist:**
+            - Windows has NO pre-built gsplat wheels on PyPI
+            - Building from source requires MSVC (Visual Studio Build Tools)
+            - These wheels include pre-compiled CUDA kernels
             
             **Installation:**
-            FreeFlow will automatically download the correct wheel.
+            FreeFlow GS Engine will automatically download the correct wheel.
+            
+            Manual install:
+            ```
+            pip install <wheel_url>
+            ```
           files: wheels/*.whl
           draft: false
           prerelease: false
