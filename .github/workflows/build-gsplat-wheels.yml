@@ -1,23 +1,19 @@
-# Build pre-compiled gsplat wheels for Windows and Linux
-# This eliminates the need for users to have Visual Studio Build Tools installed on Windows
+# Build pre-compiled gsplat wheels for Windows ONLY
+#
+# Why Windows only:
+# - Linux: gsplat team provides pre-built wheels (no need to duplicate)
+# - macOS: gsplat requires CUDA which doesn't exist on Mac
+# - Windows: NO pre-built wheels exist, and MSVC is required for JIT compilation
 #
 # Why this matters for 4D Gaussian Splatting:
 # - Splatfacto supports checkpoint/warm-start (Frame N+1 trains from Frame N's state)
 # - This creates temporally coherent 4D Gaussian Splats with smooth transitions
 # - Brush engine does NOT support warm-start, so Splatfacto is critical for 4D
 # - gsplat is required by Splatfacto for GPU-accelerated Gaussian rasterization
-# - On Windows, gsplat requires MSVC to JIT-compile CUDA kernels - most users don't have this
-# - By shipping pre-built wheels, FreeFlow users can run Splatfacto without compiler setup
-#
-# Platform support:
-# - Windows: Pre-built wheels essential (no MSVC required)
-# - Linux: Pre-built wheels for convenience (gsplat team also provides these)
-# - macOS: NOT SUPPORTED - gsplat requires CUDA, which doesn't exist on Mac
 
 name: Build gsplat Wheels
 
 on:
-  # Manual trigger with version input
   workflow_dispatch:
     inputs:
       gsplat_version:
@@ -39,9 +35,6 @@ on:
           - cu124
 
 jobs:
-  # ============================================
-  # Windows Build
-  # ============================================
   build-windows:
     runs-on: windows-2022
     strategy:
@@ -111,76 +104,8 @@ jobs:
           path: dist/*.whl
           retention-days: 90
 
-  # ============================================
-  # Linux Build
-  # ============================================
-  build-linux:
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11', '3.12']
-    
-    steps:
-      - name: Checkout FreeFlow repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.15
-        id: cuda-toolkit
-        with:
-          cuda: '12.4.0'
-          method: 'network'
-
-      - name: Verify build tools
-        run: |
-          echo "=== CUDA ==="
-          nvcc --version
-          echo "=== GCC ==="
-          gcc --version
-          echo "=== Python ==="
-          python --version
-
-      - name: Install PyTorch with CUDA
-        run: |
-          python -m pip install --upgrade pip wheel setuptools
-          python -m pip install torch==${{ github.event.inputs.torch_version }} torchvision --index-url https://download.pytorch.org/whl/${{ github.event.inputs.cuda_version }}
-
-      - name: Verify PyTorch CUDA
-        run: |
-          python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')"
-
-      - name: Install build dependencies
-        run: |
-          python -m pip install ninja cmake
-
-      - name: Build gsplat wheel
-        env:
-          TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
-          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-        run: |
-          python -m pip wheel gsplat==${{ github.event.inputs.gsplat_version }} --no-deps --wheel-dir ./dist
-
-      - name: List built wheels
-        run: ls -la dist/
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gsplat-linux-py${{ matrix.python-version }}-${{ github.event.inputs.cuda_version }}
-          path: dist/*.whl
-          retention-days: 90
-
-  # ============================================
-  # Create Release with all wheels
-  # ============================================
   create-release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -200,28 +125,20 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: gsplat-v${{ github.event.inputs.gsplat_version }}-${{ github.event.inputs.cuda_version }}
-          name: "gsplat ${{ github.event.inputs.gsplat_version }} Pre-built Wheels (${{ github.event.inputs.cuda_version }})"
+          name: "gsplat ${{ github.event.inputs.gsplat_version }} Windows Wheels (${{ github.event.inputs.cuda_version }})"
           body: |
-            ## Pre-compiled gsplat ${{ github.event.inputs.gsplat_version }} wheels
+            ## Pre-compiled gsplat ${{ github.event.inputs.gsplat_version }} wheels for Windows
             
-            **Why these exist:**
-            - gsplat requires CUDA kernel compilation
-            - On Windows, this needs MSVC (Visual Studio Build Tools) which most users don't have
-            - These pre-built wheels let FreeFlow users run Splatfacto without any compiler setup
+            **Why Windows only:**
+            - Linux wheels are provided by the gsplat team
+            - macOS is not supported (gsplat requires CUDA)
+            - Windows has NO pre-built wheels, and requires MSVC for compilation
             
             **Why Splatfacto matters for 4D Gaussian Splatting:**
             - Splatfacto supports **checkpoint/warm-start training**
             - Frame N+1 continues from Frame N's trained state
             - This creates **temporally coherent** 4D Gaussian Splats
-            - Smooth transitions between frames instead of flickering
-            - **Brush engine does NOT support this** - Splatfacto is essential for quality 4D
-            
-            **Platform Support:**
-            | Platform | Status |
-            |----------|--------|
-            | Windows | ✅ Supported (this is the main use case) |
-            | Linux | ✅ Supported |
-            | macOS | ❌ Not supported (gsplat requires CUDA) |
+            - Brush engine does NOT support this
             
             **Included wheels:**
             - PyTorch ${{ github.event.inputs.torch_version }}
@@ -229,10 +146,7 @@ jobs:
             - Python 3.11 and 3.12
             
             **Installation:**
-            FreeFlow will automatically download the correct wheel. Manual install:
-            ```bash
-            pip install <wheel_url>
-            ```
+            FreeFlow will automatically download the correct wheel.
           files: wheels/*.whl
           draft: false
           prerelease: false

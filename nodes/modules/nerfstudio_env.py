@@ -735,15 +735,14 @@ class NerfstudioEnvironment:
         except Exception as e:
             print(f"[NerfstudioEnv] Could not detect PyTorch CUDA version: {e}")
         
-        # Try pre-built wheel for Windows and Linux
-        if sys.platform in ("win32", "linux") and cuda_suffix:
-            platform_tag = "win_amd64" if sys.platform == "win32" else "linux_x86_64"
-            print(f"[NerfstudioEnv] Trying pre-built gsplat wheel for {sys.platform}...")
+        # Try pre-built wheel for Windows only (Linux has wheels from gsplat team on PyPI)
+        if sys.platform == "win32" and cuda_suffix:
+            print(f"[NerfstudioEnv] Windows detected - trying pre-built gsplat wheel...")
             
-            # Construct wheel URL
-            # Format: gsplat-{version}-cp{py}-cp{py}-{platform}.whl
+            # Construct wheel URL from our GitHub releases
+            # Format: gsplat-{version}-cp{py}-cp{py}-win_amd64.whl
             py_tag = f"cp{py_version.replace('.', '')}"
-            wheel_name = f"gsplat-{cls.GSPLAT_VERSION}-{py_tag}-{py_tag}-{platform_tag}.whl"
+            wheel_name = f"gsplat-{cls.GSPLAT_VERSION}-{py_tag}-{py_tag}-win_amd64.whl"
             wheel_url = f"https://github.com/{cls.GSPLAT_WHEELS_REPO}/releases/download/gsplat-v{cls.GSPLAT_VERSION}-{cuda_suffix}/{wheel_name}"
             
             print(f"[NerfstudioEnv] Trying wheel: {wheel_url}")
