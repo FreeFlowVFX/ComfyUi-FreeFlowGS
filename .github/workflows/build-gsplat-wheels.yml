@@ -106,7 +106,8 @@ jobs:
           
           # The setup.py in git source has -diag-suppress=20012,186 for nvcc
           # This is CRITICAL - the PyPI sdist + JIT path does NOT have this!
-          pip install -v .
+          # --no-build-isolation: Use existing env with PyTorch (setup.py imports torch)
+          pip install -v --no-build-isolation .
           
           Write-Host ""
           Write-Host "=== Build complete ==="
