@@ -764,7 +764,7 @@ class NerfstudioEnvironment:
             torch_version = None
             try:
                 result = subprocess.run(
-                    [str(python), "-c", "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))"],
+                    [str(python), "-c", "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:3]))"],
                     capture_output=True, text=True, timeout=30
                 )
                 if result.returncode == 0:
@@ -777,7 +777,7 @@ class NerfstudioEnvironment:
             # Naming: gsplat-{version}+pt{torch}cu{cuda}-cp{py}-cp{py}-win_amd64.whl
             # Example: gsplat-1.5.3+pt260cu124-cp312-cp312-win_amd64.whl
             py_ver_short = py_version.replace(".", "")  # "3.12" -> "312"
-            torch_ver_short = torch_version.replace(".", "") if torch_version else "260"  # "2.6" -> "26", fallback to 260
+            torch_ver_short = torch_version.replace(".", "") if torch_version else "260"  # "2.6.0" -> "260", fallback to 260
             wheel_name = f"gsplat-{cls.GSPLAT_VERSION}+pt{torch_ver_short}{cuda_suffix}-cp{py_ver_short}-cp{py_ver_short}-win_amd64.whl"
             # URL-encode the + as %2B for the download URL
             wheel_url = f"https://github.com/{cls.GSPLAT_WHEELS_REPO}/releases/download/gsplat-v{cls.GSPLAT_VERSION}-{cuda_suffix}/{wheel_name.replace('+', '%2B')}"
