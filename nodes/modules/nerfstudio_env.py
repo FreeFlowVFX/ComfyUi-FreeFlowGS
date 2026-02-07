@@ -376,6 +376,8 @@ class NerfstudioEnvironment:
         Returns:
             True if venv was created successfully.
         """
+        import platform as plat
+        
         def report(msg: str, progress: float):
             print(f"[NerfstudioEnv] {msg}")
             if progress_callback:
@@ -383,8 +385,27 @@ class NerfstudioEnvironment:
         
         print(f"[NerfstudioEnv] === Starting venv creation ===")
         print(f"[NerfstudioEnv] Platform: {sys.platform}")
+        print(f"[NerfstudioEnv] Architecture: {plat.machine()}")
         print(f"[NerfstudioEnv] PROJECT_ROOT: {cls.PROJECT_ROOT}")
         print(f"[NerfstudioEnv] VENV_PATH: {cls.VENV_PATH}")
+        
+        # --- PLATFORM CHECK: Fail early on unsupported platforms ---
+        if sys.platform == "darwin":
+            machine = plat.machine().lower()
+            if "arm" in machine or "aarch64" in machine:
+                report("ERROR: Apple Silicon Mac (M1/M2/M3) detected - CUDA not supported", 0.0)
+                report("Nerfstudio/Splatfacto requires NVIDIA CUDA. Use Brush engine instead.", 0.0)
+                return False
+            else:
+                report("ERROR: macOS Intel detected - no CUDA support (Apple dropped NVIDIA)", 0.0)
+                report("Nerfstudio/Splatfacto requires NVIDIA CUDA. Use Brush engine instead.", 0.0)
+                return False
+        
+        if sys.platform == "linux":
+            machine = plat.machine().lower()
+            if "arm" in machine or "aarch64" in machine:
+                report("WARNING: Linux ARM detected - gsplat may not work on this platform", 0.0)
+                # Continue anyway - Jetson might work
         
         # Ensure project directory exists (it should, but just in case)
         if not cls.PROJECT_ROOT.exists():

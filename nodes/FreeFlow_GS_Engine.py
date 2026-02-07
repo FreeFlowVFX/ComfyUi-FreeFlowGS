@@ -25,8 +25,20 @@ import folder_paths
 from ..utils import FreeFlowUtils
 
 # Import engine backends from engines package
-from .modules.engines import IGSEngine, BrushEngine, SPLATFACTO_AVAILABLE, OPENSPLAT_AVAILABLE
-from .modules.engines import SplatfactoEngine  # Always available (auto-installs on first use)
+from .modules.engines import (
+    IGSEngine, 
+    BrushEngine, 
+    SPLATFACTO_AVAILABLE, 
+    OPENSPLAT_AVAILABLE,
+    CUDA_SUPPORTED,
+    CUDA_UNSUPPORTED_REASON,
+)
+
+# Only import SplatfactoEngine if CUDA is supported on this platform
+if SPLATFACTO_AVAILABLE:
+    from .modules.engines import SplatfactoEngine
+else:
+    SplatfactoEngine = None
 
 if OPENSPLAT_AVAILABLE:
     from .modules.engines import OpenSplatEngine
@@ -56,23 +68,30 @@ class FreeFlow_GS_Engine:
 
     @classmethod
     def INPUT_TYPES(s):
-        # Build engine options - show all engines, check availability at runtime
-        # This allows auto-install on first use rather than hiding options
-        engine_options = ["Brush (Fast)"]  # Brush is always available (bundled binary)
+        # Build engine options based on platform capabilities
+        # Only show engines that can actually work on the current system
+        engine_options = ["Brush (Fast)"]  # Brush is always available (bundled binary for all platforms)
         
-        # Splatfacto is always shown - will auto-install nerfstudio on first use
-        # The engine class exists, actual nerfstudio installation check happens at training time
-        engine_options.append("Splatfacto (Pro)")
+        # Splatfacto requires CUDA - only show if platform supports it
+        if SPLATFACTO_AVAILABLE:
+            engine_options.append("Splatfacto (Pro)")
         
-        # Only show OpenSplat if binary is found (no auto-install for this one)
-        if OPENSPLAT_AVAILABLE:
+        # OpenSplat works on all platforms (OpenCL/CPU fallback)
+        if OPENSPLAT_AVAILABLE and OpenSplatEngine is not None:
             try:
-                from .modules.engines import OpenSplatEngine
                 _test_engine = OpenSplatEngine()
                 if _test_engine.is_available():
                     engine_options.append("OpenSplat (Mac/CPU)")
             except Exception:
                 pass  # OpenSplat not ready
+        
+        # Build tooltip based on available engines
+        tooltip_parts = ["Brush: Fast single-binary trainer (all platforms)."]
+        if SPLATFACTO_AVAILABLE:
+            tooltip_parts.append("Splatfacto: Production quality (CUDA required).")
+        else:
+            tooltip_parts.append(f"Splatfacto: Not available ({CUDA_UNSUPPORTED_REASON}).")
+        tooltip_parts.append("OpenSplat: Mac/CPU alternative.")
         
         return {
             "required": {
@@ -88,7 +107,7 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "engine_backend": (engine_options, {
                     "default": "Brush (Fast)",
-                    "tooltip": "Brush: Fast single-binary trainer. Splatfacto: Production quality (requires CUDA). OpenSplat: Mac/CPU alternative."
+                    "tooltip": " ".join(tooltip_parts)
                 }),
 
                 # ═══════════════════════════════════════════════════════════════

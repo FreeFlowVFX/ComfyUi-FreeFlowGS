@@ -2,21 +2,60 @@
 FreeFlow GS Engine - Backend Engines Package
 Provides pluggable Gaussian Splatting training backends.
 
-IMPORTANT: Availability flags indicate whether the engine CLASS can be imported,
-NOT whether the underlying tool is installed. Installation checks happen at runtime
-when the user first selects an engine, allowing for auto-install on first use.
+Platform Support:
+- BrushEngine: All platforms (Windows, Linux, Mac ARM/Intel)
+- SplatfactoEngine: CUDA only (Windows, Linux with NVIDIA GPU)
+- OpenSplatEngine: All platforms with OpenCL or CPU fallback
 """
+
+import sys
+import platform
 
 from .base_engine import IGSEngine
 from .brush_engine import BrushEngine
 
-# SplatfactoEngine - class is always available (nerfstudio installation check is at runtime)
-# The engine uses subprocess isolation, so nerfstudio doesn't need to be installed
-# for the class to import. Auto-install happens on first use.
-from .splatfacto_engine import SplatfactoEngine
-SPLATFACTO_AVAILABLE = True  # Class always exists; runtime checks if nerfstudio is installed
+# --- PLATFORM DETECTION ---
+def _check_cuda_platform():
+    """
+    Check if the current platform can support CUDA-based engines.
+    Returns (is_supported, reason_if_not)
+    """
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    
+    # macOS doesn't support CUDA at all
+    if system == "darwin":
+        if "arm" in machine or "aarch64" in machine:
+            return False, "Apple Silicon Mac (M1/M2/M3) - no CUDA support"
+        else:
+            return False, "macOS Intel - no CUDA support (Apple dropped NVIDIA)"
+    
+    # Linux ARM (like Jetson) might have CUDA, but nerfstudio doesn't support it well
+    if system == "linux" and ("arm" in machine or "aarch64" in machine):
+        # Could potentially work on Jetson, but let's be conservative
+        return False, "Linux ARM - nerfstudio/gsplat may not work"
+    
+    # Windows and Linux x86_64 - assume CUDA capable (will fail at install if no GPU)
+    return True, None
 
-# OpenSplatEngine - class is always available (binary detection happens at runtime)
+CUDA_SUPPORTED, CUDA_UNSUPPORTED_REASON = _check_cuda_platform()
+
+# SplatfactoEngine - Only available on CUDA-capable platforms
+# On Mac/ARM, don't even show the option to prevent confusion
+if CUDA_SUPPORTED:
+    try:
+        from .splatfacto_engine import SplatfactoEngine
+        SPLATFACTO_AVAILABLE = True
+    except ImportError as e:
+        SplatfactoEngine = None
+        SPLATFACTO_AVAILABLE = False
+        print(f"[Engines] SplatfactoEngine import failed: {e}")
+else:
+    SplatfactoEngine = None
+    SPLATFACTO_AVAILABLE = False
+    print(f"[Engines] Splatfacto disabled: {CUDA_UNSUPPORTED_REASON}")
+
+# OpenSplatEngine - Available on all platforms (uses OpenCL or CPU)
 try:
     from .opensplat_engine import OpenSplatEngine
     OPENSPLAT_AVAILABLE = True
@@ -29,6 +68,8 @@ __all__ = [
     'BrushEngine', 
     'SplatfactoEngine', 
     'SPLATFACTO_AVAILABLE',
+    'CUDA_SUPPORTED',
+    'CUDA_UNSUPPORTED_REASON',
     'OpenSplatEngine',
     'OPENSPLAT_AVAILABLE',
 ]
