@@ -54,6 +54,7 @@ class FreeFlow_AdaptiveEngine:
                 # --- 3. Topology Control ---
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
                 "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay temporal filter to smooth point positions across frames. Eliminates jitter. REQUIRES Fixed Topology mode."}),
+                "realign_topology": ("BOOLEAN", {"default": True, "tooltip": "Re-align point IDs using nearest-neighbor matching before smoothing. Fixes point order shuffling from Brush. Disable only for debugging."}),
                 
                 # --- 4. Core Model Parameters ---
                 "splat_count": ("INT", {"default": 500000, "min": 1000, "max": 10000000, "tooltip": "Maximum number of Gaussian splats. Higher = more detail but slower rendering. 500k is good for film, 100k for previews."}),
@@ -136,6 +137,23 @@ class FreeFlow_AdaptiveEngine:
             return list(range(max_frames))
             
         return sorted_indices
+
+    def _extract_frame_number(self, image_path):
+        """
+        Extract the real frame number from an image filename.
+        Examples: 
+            'cam01_frame_0001.jpg' -> 1
+            'frame_0042.png' -> 42
+            '00005.exr' -> 5
+        Returns the last number found in the filename (common convention).
+        """
+        import re
+        filename = Path(image_path).stem
+        nums = re.findall(r'\d+', filename)
+        if nums:
+            return int(nums[-1])  # Last number is typically the frame number
+        return 0  # Fallback
+
 
     def _export_sparse_to_ply(self, sparse_dir, output_ply):
         """
@@ -349,7 +367,7 @@ class FreeFlow_AdaptiveEngine:
         return active_cams
 
     def adapt_flow(self, multicam_feed, colmap_anchor, splat_count, sh_degree,
-                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False,
+                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False, realign_topology=True,
                    visualize_training="Off", preview_interval=500, eval_camera_index=10,
                    iterations=10000, learning_rate=0.0005, densification_interval=300,
                    opacity_reset_interval=5000, densify_grad_threshold=0.0002, use_symlinks=True,
@@ -434,21 +452,47 @@ class FreeFlow_AdaptiveEngine:
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
 
-        target_anchor_id = indices_to_process[0] # Default: First frame of THIS batch
-        if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
-             target_anchor_id = int(distributed_anchor_frame.strip())
-             # Priority: If target anchor is in our list, move it to FRONT
-             if target_anchor_id in indices_to_process:
-                 indices_to_process.remove(target_anchor_id)
-                 indices_to_process.insert(0, target_anchor_id)
-                 print(f"   ⚓ Distributed Priority: Moved Frame {target_anchor_id} to start of queue to generate Anchor.")
+        # Build mapping: list_index -> real_frame_id for anchor priority
+        first_cam = cameras[0]
+        index_to_real_frame = {}
+        for list_idx in indices_to_process:
+            if list_idx < len(multicam_feed[first_cam]):
+                real_id = self._extract_frame_number(multicam_feed[first_cam][list_idx])
+            else:
+                real_id = list_idx  # Fallback
+            index_to_real_frame[list_idx] = real_id
         
-        auto_anchor_filename = f"anchor_frame_{target_anchor_id}.ply"
+        # Default: First frame of THIS batch (use its real frame ID)
+        target_anchor_id = index_to_real_frame[indices_to_process[0]]
+        
+        if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
+            target_anchor_id = int(distributed_anchor_frame.strip())
+            # Priority: Find which list_index corresponds to this real frame ID
+            anchor_list_index = None
+            for list_idx, real_id in index_to_real_frame.items():
+                if real_id == target_anchor_id:
+                    anchor_list_index = list_idx
+                    break
+            
+            if anchor_list_index is not None and anchor_list_index in indices_to_process:
+                indices_to_process.remove(anchor_list_index)
+                indices_to_process.insert(0, anchor_list_index)
+                print(f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue.")
+            else:
+                print(f"   ⚠️ Warning: Anchor frame {target_anchor_id} not found in selected frames. Using default anchor.")
+        
         # -------------------------
 
         for idx, i in enumerate(indices_to_process):
-            frame_work_dir = output_dir / f"frame_{i:04d}_work"
-            ply_out = output_dir / f"{filename_prefix}_frame_{i:04d}.ply"
+            # Get REAL frame number from actual image filename (not list index!)
+            first_cam = cameras[0]
+            if i < len(multicam_feed[first_cam]):
+                real_frame_id = self._extract_frame_number(multicam_feed[first_cam][i])
+            else:
+                real_frame_id = i  # Fallback to index if out of bounds
+            
+            frame_work_dir = output_dir / f"frame_{real_frame_id:04d}_work"
+            ply_out = output_dir / f"{filename_prefix}_frame_{real_frame_id:04d}.ply"
             
             # Prepare folder structure
             active_cams = self._prepare_brush_folder(
@@ -472,12 +516,17 @@ class FreeFlow_AdaptiveEngine:
             
             # 2. Check Distributed Anchor (Only if NOT warm starting)
             elif distributed_anchor:
-                 # Check Path OR Auto-File
+                 # Check Path OR Auto-Find anchor in folder
                  anchor_file = None
                  if distributed_anchor_path and Path(distributed_anchor_path).exists():
                      anchor_file = Path(distributed_anchor_path)
-                 elif (output_dir / "Distributed_Anchor" / auto_anchor_filename).exists():
-                     anchor_file = output_dir / "Distributed_Anchor" / auto_anchor_filename
+                 else:
+                     # Auto-find: Look for any anchor_frame_*.ply in Distributed_Anchor folder
+                     anchor_dir = output_dir / "Distributed_Anchor"
+                     if anchor_dir.exists():
+                         anchor_candidates = list(anchor_dir.glob("anchor_frame_*.ply"))
+                         if anchor_candidates:
+                             anchor_file = anchor_candidates[0]  # Use first found
                  
                  if anchor_file:
                      init_source_ply = anchor_file
@@ -485,7 +534,7 @@ class FreeFlow_AdaptiveEngine:
             
             # Perform Initialization Override
             if init_source_ply:
-                converted_ok = self._convert_ply_to_points3d(init_source_ply, sparse_target / "points3D.ply")
+                converted_ok = self._convert_ply_to_points3d(init_source_ply, sparse_target / "points3D.txt")
                 if converted_ok:
                     print(f"   🚀 Initializing Frame {i} from {init_mode}") # FreeFlowUtils.log not imported? use print
             pass # Spacer
@@ -563,7 +612,7 @@ class FreeFlow_AdaptiveEngine:
             
             # Pass reference to self so simulator can update cached speed
             # Also pass visualization mode for file-based progress
-            frame_name = f"{filename_prefix}_frame_{i:04d}"
+            frame_name = f"{filename_prefix}_frame_{real_frame_id:04d}"
             pbar_thread = threading.Thread(
                 target=self._pbar_simulator, 
                 args=(pbar, iterations, seconds_per_step, current_step_global, process, idx == 0, visualize_training, frame_name)
@@ -641,10 +690,12 @@ class FreeFlow_AdaptiveEngine:
 
             # --- DISTRIBUTED: Save Anchor ---
             # Save IF: Distributed Enabled AND Current Frame is the Target Anchor
-            if distributed_anchor and i == target_anchor_id and ply_out.exists():
+            if distributed_anchor and real_frame_id == target_anchor_id and ply_out.exists():
                 distributed_dir = output_dir / "Distributed_Anchor"
                 distributed_dir.mkdir(exist_ok=True)
-                anchor_dst = distributed_dir / auto_anchor_filename
+                # Use REAL frame ID for anchor filename (not list index)
+                anchor_filename = f"anchor_frame_{real_frame_id:04d}.ply"
+                anchor_dst = distributed_dir / anchor_filename
                 shutil.copy(str(ply_out), str(anchor_dst))
                 print(f"   ⚓ Saved Distributed Anchor to: {anchor_dst}")
 
@@ -652,7 +703,7 @@ class FreeFlow_AdaptiveEngine:
             # If warmup, move result to temp folder to avoid cluttering main output
             is_warmup = (idx < warmup_frames)
             # Force keep if it's the anchor (we usually want the anchor frame in the sequence)
-            if distributed_anchor and i == target_anchor_id:
+            if distributed_anchor and real_frame_id == target_anchor_id:
                 is_warmup = False
             
             if is_warmup:
@@ -661,7 +712,7 @@ class FreeFlow_AdaptiveEngine:
                  warmup_path = warmup_dir / ply_out.name
                  shutil.move(str(ply_out), str(warmup_path))
                  prev_ply = warmup_path
-                 print(f"   🔥 Warmup: Moved Frame {i} to temp storage.")
+                 print(f"   🔥 Warmup: Moved Frame {real_frame_id} to temp storage.")
             else:
                  prev_ply = ply_out
 
@@ -680,7 +731,7 @@ class FreeFlow_AdaptiveEngine:
             if is_fixed_topology and len(indices_to_process) > 3:
                 FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
                 try:
-                    self._apply_temporal_smoothing(output_dir, filename_prefix, indices_to_process)
+                    self._apply_temporal_smoothing(output_dir, filename_prefix, indices_to_process, multicam_feed, cameras, realign_topology)
                     FreeFlowUtils.log("✅ Smoothing Complete!")
                 except Exception as e:
                     FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
@@ -698,11 +749,14 @@ class FreeFlow_AdaptiveEngine:
 
         return (str(output_dir),)
 
-    def _apply_temporal_smoothing(self, output_dir, prefix, indices):
+    def _apply_temporal_smoothing(self, output_dir, prefix, indices, multicam_feed, cameras, realign_topology=True):
         """
         Applies Savitzky-Golay filtering to the positions of the sequence.
         ONLY works for Fixed Topology mode where point count is constant.
         SAVES to a 'smoothed' subfolder to preserve original trained files.
+        
+        If realign_topology is True, performs KD-Tree based point ID realignment
+        before smoothing to fix point order shuffling from Brush.
         """
         if not indices: return
         
@@ -711,10 +765,20 @@ class FreeFlow_AdaptiveEngine:
         smoothed_dir.mkdir(exist_ok=True)
         FreeFlowUtils.log(f"   📁 Smoothed output will be saved to: {smoothed_dir}")
         
-        # Source PLY files (originals - read only)
-        source_files = [output_dir / f"{prefix}_frame_{i:04d}.ply" for i in indices]
-        # Destination PLY files (smoothed folder)
-        output_files = [smoothed_dir / f"{prefix}_frame_{i:04d}.ply" for i in indices]
+        # Extract REAL frame IDs from source image filenames
+        first_cam = cameras[0]
+        real_frame_ids = []
+        for i in indices:
+            if i < len(multicam_feed[first_cam]):
+                real_id = self._extract_frame_number(multicam_feed[first_cam][i])
+            else:
+                real_id = i  # Fallback
+            real_frame_ids.append(real_id)
+        
+        # Source PLY files (originals - read only) - use REAL frame IDs
+        source_files = [output_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
+        # Destination PLY files (smoothed folder) - use REAL frame IDs
+        output_files = [smoothed_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
         
         # Check first file to get vertex count and header size
         first_ply = source_files[0]
@@ -833,6 +897,24 @@ class FreeFlow_AdaptiveEngine:
             xyz_floats = xyz_bytes.view(dtype=np.float32).reshape(vertex_count, 3)
             
             points[t] = xyz_floats
+        
+        # 3.5. TOPOLOGY REALIGNMENT (KD-Tree based)
+        # Fixes point ID shuffling from Brush by matching points incrementally
+        if realign_topology:
+            FreeFlowUtils.log("   🔧 Realigning topology using KD-Tree matching...")
+            reorder_maps = self._compute_topology_realignment(points)
+            
+            # Apply reorder to both points array and raw data
+            for t in range(T):
+                indices_map = reorder_maps[t]
+                
+                # Reorder points array
+                points[t] = points[t][indices_map]
+                
+                # Reorder the full PLY binary data (all properties, not just XYZ)
+                all_data[t] = self._reorder_ply_binary(all_data[t], indices_map, header_len, stride, vertex_count)
+            
+            FreeFlowUtils.log(f"   ✅ Realigned {T} frames")
             
         # 4. Apply Savitzky-Golay
         # Smooth across Time (axis 0)
@@ -874,6 +956,75 @@ class FreeFlow_AdaptiveEngine:
                     
         return True
 
+    def _compute_topology_realignment(self, all_positions):
+        """
+        Computes reorder indices for each frame using incremental KD-Tree matching.
+        
+        Uses "chained" matching where each frame is matched to the previous frame,
+        not to Frame 0. This prevents drift over long sequences with large motion.
+        
+        Args:
+            all_positions: np.ndarray of shape (T, N, 3) where T=frames, N=points
+            
+        Returns:
+            List of T index arrays. Each array maps original indices to reordered indices.
+        """
+        from scipy.spatial import cKDTree
+        
+        T, N, _ = all_positions.shape
+        reorder_maps = [np.arange(N)]  # Frame 0: Identity mapping (reference)
+        
+        ref_positions = all_positions[0].copy()  # Start with Frame 0 as reference
+        
+        for t in range(1, T):
+            current_positions = all_positions[t]
+            
+            # Build tree of CURRENT frame's positions
+            tree = cKDTree(current_positions)
+            
+            # Query: For each point in REFERENCE, find closest point in CURRENT
+            # This gives us: "Where in current frame is the point that was at ref[i]?"
+            distances, indices = tree.query(ref_positions, k=1)
+            
+            # Store the mapping
+            reorder_maps.append(indices)
+            
+            # Update reference for next iteration (Incremental Chaining)
+            # The new reference is the CURRENT positions reordered to match the old reference
+            ref_positions = current_positions[indices]
+        
+        return reorder_maps
+
+    def _reorder_ply_binary(self, data, indices, header_len, stride, vertex_count):
+        """
+        Reorders all vertex data in a PLY binary buffer according to the given index mapping.
+        Preserves the header and reorders all vertex properties (XYZ, colors, SH, etc.).
+        
+        Args:
+            data: bytearray containing the full PLY file (header + binary data)
+            indices: np.ndarray of integers, new order for vertices
+            header_len: int, length of the PLY header in bytes
+            stride: int, bytes per vertex
+            vertex_count: int, number of vertices
+            
+        Returns:
+            New bytearray with reordered vertex data
+        """
+        # Extract header (unchanged)
+        header = bytes(data[:header_len])
+        
+        # Extract vertex data as numpy array for efficient reordering
+        vertex_data = np.frombuffer(data, dtype=np.uint8, offset=header_len)
+        vertex_data = vertex_data.reshape(vertex_count, stride)
+        
+        # Reorder using fancy indexing
+        reordered_data = vertex_data[indices].copy()
+        
+        # Reconstruct the full buffer
+        result = bytearray(header)
+        result.extend(reordered_data.tobytes())
+        
+        return result
 
 
     def _convert_ply_to_points3d(self, ply_path, out_path):

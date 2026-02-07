@@ -22,6 +22,7 @@ class FreeFlow_PostProcessSmoother:
             },
             "optional": {
                 "destination_path": ("STRING", {"default": "", "multiline": False, "placeholder": "Optional: Custom save folder path"}),
+                "realign_topology": ("BOOLEAN", {"default": True, "tooltip": "Re-align point IDs using nearest-neighbor matching before smoothing. Fixes point order shuffling from Brush."}),
             }
         }
 
@@ -30,7 +31,7 @@ class FreeFlow_PostProcessSmoother:
     FUNCTION = "smooth_sequence"
     CATEGORY = "FreeFlow"
 
-    def smooth_sequence(self, ply_sequence, window_size, poly_order, destination_path=""):
+    def smooth_sequence(self, ply_sequence, window_size, poly_order, destination_path="", realign_topology=True):
         if len(ply_sequence) < window_size:
             FreeFlowUtils.log("Sequence shorter than window size, returning original.", "WARN")
             return (ply_sequence,)
@@ -114,6 +115,22 @@ class FreeFlow_PostProcessSmoother:
         # Stack -> (T, N, D)
         full_tensor = np.stack(frames_data, axis=0)
         
+        # 2.5. TOPOLOGY REALIGNMENT (KD-Tree based)
+        # Fixes point ID shuffling from Brush by matching points incrementally
+        if realign_topology:
+            FreeFlowUtils.log("   🔧 Realigning topology using KD-Tree matching...")
+            
+            # Extract XYZ (first 3 floats) for matching
+            xyz_positions = full_tensor[:, :, :3].copy()
+            reorder_maps = self._compute_topology_realignment(xyz_positions)
+            
+            # Apply reorder to full tensor
+            T = full_tensor.shape[0]
+            for t in range(T):
+                full_tensor[t] = full_tensor[t][reorder_maps[t]]
+            
+            FreeFlowUtils.log(f"   ✅ Realigned {T} frames")
+        
         # Apply Savitzky-Golay along axis 0 (Time)
         # Check window size vs T
         if window_size > len(ply_sequence):
@@ -137,3 +154,40 @@ class FreeFlow_PostProcessSmoother:
             
         FreeFlowUtils.log("✅ Smoothing Complete.")
         return (new_paths,)
+
+    def _compute_topology_realignment(self, all_positions):
+        """
+        Computes reorder indices for each frame using incremental KD-Tree matching.
+        
+        Uses "chained" matching where each frame is matched to the previous frame,
+        not to Frame 0. This prevents drift over long sequences with large motion.
+        
+        Args:
+            all_positions: np.ndarray of shape (T, N, 3) where T=frames, N=points
+            
+        Returns:
+            List of T index arrays. Each array maps original indices to reordered indices.
+        """
+        from scipy.spatial import cKDTree
+        
+        T, N, _ = all_positions.shape
+        reorder_maps = [np.arange(N)]  # Frame 0: Identity mapping (reference)
+        
+        ref_positions = all_positions[0].copy()  # Start with Frame 0 as reference
+        
+        for t in range(1, T):
+            current_positions = all_positions[t]
+            
+            # Build tree of CURRENT frame's positions
+            tree = cKDTree(current_positions)
+            
+            # Query: For each point in REFERENCE, find closest point in CURRENT
+            distances, indices = tree.query(ref_positions, k=1)
+            
+            # Store the mapping
+            reorder_maps.append(indices)
+            
+            # Update reference for next iteration (Incremental Chaining)
+            ref_positions = current_positions[indices]
+        
+        return reorder_maps

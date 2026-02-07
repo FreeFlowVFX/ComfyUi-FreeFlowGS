@@ -70,6 +70,19 @@ try:
     else:
         print(f"   • COLMAP: Found ({colmap_path.name})")
 
+    # Check Nerfstudio status (Splatfacto backend)
+    try:
+        from .nodes.modules.nerfstudio_env import NerfstudioEnvironment
+        if NerfstudioEnvironment.is_installed():
+            ns_version = NerfstudioEnvironment.get_version()
+            cuda_ver = NerfstudioEnvironment._detect_cuda_version()
+            cuda_str = f", CUDA {cuda_ver}" if cuda_ver else ", CPU only (slow)"
+            print(f"   • Nerfstudio: Ready (v{ns_version}{cuda_str})")
+        else:
+            print("   • Nerfstudio: Not installed (Splatfacto engine unavailable)")
+    except Exception as e:
+        print(f"   • Nerfstudio: Error checking status: {e}")
+
     print("="*50 + "\n")
 
     # --- Node Imports ---

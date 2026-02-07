@@ -26,10 +26,7 @@ from ..utils import FreeFlowUtils
 
 # Import engine backends from engines package
 from .modules.engines import IGSEngine, BrushEngine, SPLATFACTO_AVAILABLE, OPENSPLAT_AVAILABLE
-if SPLATFACTO_AVAILABLE:
-    from .modules.engines import SplatfactoEngine
-else:
-    SplatfactoEngine = None  # Placeholder when not available
+from .modules.engines import SplatfactoEngine  # Always available (auto-installs on first use)
 
 if OPENSPLAT_AVAILABLE:
     from .modules.engines import OpenSplatEngine
@@ -59,20 +56,15 @@ class FreeFlow_GS_Engine:
 
     @classmethod
     def INPUT_TYPES(s):
-        # Build engine options based on ACTUAL availability (installed and ready)
+        # Build engine options - show all engines, check availability at runtime
+        # This allows auto-install on first use rather than hiding options
         engine_options = ["Brush (Fast)"]  # Brush is always available (bundled binary)
         
-        # Only show Splatfacto if nerfstudio is actually installed
-        if SPLATFACTO_AVAILABLE:
-            try:
-                from .modules.engines import SplatfactoEngine
-                _test_engine = SplatfactoEngine()
-                if _test_engine.is_available():
-                    engine_options.append("Splatfacto (Pro)")
-            except Exception:
-                pass  # Splatfacto not ready
+        # Splatfacto is always shown - will auto-install nerfstudio on first use
+        # The engine class exists, actual nerfstudio installation check happens at training time
+        engine_options.append("Splatfacto (Pro)")
         
-        # Only show OpenSplat if binary is found
+        # Only show OpenSplat if binary is found (no auto-install for this one)
         if OPENSPLAT_AVAILABLE:
             try:
                 from .modules.engines import OpenSplatEngine
@@ -1078,18 +1070,29 @@ class FreeFlow_GS_Engine:
         if "Brush" in engine_backend:
             engine = BrushEngine()
         elif "Splatfacto" in engine_backend or "Nerfstudio" in engine_backend:
-            if not SPLATFACTO_AVAILABLE:
-                raise RuntimeError(
-                    "Splatfacto backend requires Nerfstudio. "
-                    "Install it via: from nodes.modules.nerfstudio_env import NerfstudioEnvironment; "
-                    "NerfstudioEnvironment.create_venv()"
-                )
             engine = SplatfactoEngine()
+            
+            # Auto-install nerfstudio if not available
             if not engine.is_available():
-                raise RuntimeError(
-                    f"Splatfacto backend not available. Status: {engine.get_status()}. "
-                    "Run NerfstudioEnvironment.create_venv() to install."
-                )
+                FreeFlowUtils.log("=" * 50)
+                FreeFlowUtils.log("🔧 Splatfacto: First-time setup - installing nerfstudio...")
+                FreeFlowUtils.log("   This may take 5-15 minutes. Please wait...")
+                FreeFlowUtils.log("=" * 50)
+                
+                def install_progress(msg, pct):
+                    FreeFlowUtils.log(f"   [{pct*100:.0f}%] {msg}")
+                
+                success = engine.install(progress_callback=install_progress)
+                
+                if not success or not engine.is_available():
+                    status = engine.get_status()
+                    raise RuntimeError(
+                        f"Failed to install Splatfacto/nerfstudio. Status: {status}\n"
+                        "Try manual install: from nodes.modules.nerfstudio_env import NerfstudioEnvironment; "
+                        "NerfstudioEnvironment.create_venv()"
+                    )
+                FreeFlowUtils.log("✅ Splatfacto installation complete!")
+            
             is_splatfacto = True
             FreeFlowUtils.log(f"   🚀 Using Splatfacto Engine v{engine.get_version()}")
         elif "OpenSplat" in engine_backend:

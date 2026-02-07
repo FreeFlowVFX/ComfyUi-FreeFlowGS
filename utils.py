@@ -465,6 +465,140 @@ class FreeFlowUtils:
              
         # Check Python Packages (Fix for shared environment conflicts)
         FreeFlowUtils.install_python_packages()
+        
+        # 4. CHECK NERFSTUDIO (Splatfacto backend) - Isolated venv INSIDE project directory
+        FreeFlowUtils.check_and_install_nerfstudio()
+
+    @staticmethod
+    def check_and_install_nerfstudio():
+        """
+        Check for Nerfstudio installation and auto-install if missing.
+        
+        Nerfstudio is installed in an isolated venv INSIDE the FreeFlow project:
+        ComfyUi-FreeFlowGS/.nerfstudio_venv/
+        
+        This ensures NO system-wide changes and NO conflicts with ComfyUI.
+        
+        Works on: Windows, macOS, Linux (requires CUDA for GPU acceleration)
+        """
+        NerfstudioEnvironment = None
+        import_error_details = []
+        
+        # Try multiple import strategies since utils.py can be called from different contexts
+        try:
+            # Strategy 1: Direct import (when nodes is in sys.path)
+            from nodes.modules.nerfstudio_env import NerfstudioEnvironment
+            print("   [Nerfstudio Import] Strategy 1 (direct import) succeeded")
+        except ImportError as e:
+            import_error_details.append(f"Strategy 1: {e}")
+        
+        if NerfstudioEnvironment is None:
+            try:
+                # Strategy 2: Add parent directory to path
+                import sys
+                from pathlib import Path
+                utils_dir = Path(__file__).parent
+                nodes_path = utils_dir / "nodes"
+                print(f"   [Nerfstudio Import] Strategy 2: utils_dir={utils_dir}, nodes_path={nodes_path}, exists={nodes_path.exists()}")
+                if nodes_path.exists() and str(utils_dir) not in sys.path:
+                    sys.path.insert(0, str(utils_dir))
+                from nodes.modules.nerfstudio_env import NerfstudioEnvironment
+                print("   [Nerfstudio Import] Strategy 2 (path modification) succeeded")
+            except ImportError as e:
+                import_error_details.append(f"Strategy 2: {e}")
+        
+        if NerfstudioEnvironment is None:
+            try:
+                # Strategy 3: Relative import from package root
+                from .nodes.modules.nerfstudio_env import NerfstudioEnvironment
+                print("   [Nerfstudio Import] Strategy 3 (relative import) succeeded")
+            except ImportError as e:
+                import_error_details.append(f"Strategy 3: {e}")
+        
+        if NerfstudioEnvironment is None:
+            print("   • Nerfstudio: Could not import NerfstudioEnvironment module")
+            for detail in import_error_details:
+                print(f"     {detail}")
+            return False
+        
+        try:
+            
+            # Check if already installed
+            if NerfstudioEnvironment.is_installed():
+                version = NerfstudioEnvironment.get_version()
+                
+                # Check for updates (like Brush does)
+                try:
+                    new_version = NerfstudioEnvironment.check_for_update()
+                    if new_version:
+                        print(f"   • Nerfstudio: Update available ({version} -> {new_version})")
+                        print("     Auto-updating Nerfstudio...")
+                        
+                        def progress_callback(message: str, progress: float):
+                            pct = int(progress * 100)
+                            print(f"     [{pct:3d}%] {message}")
+                        
+                        if NerfstudioEnvironment.upgrade(progress_callback):
+                            version = NerfstudioEnvironment.get_version()
+                            print(f"   • Nerfstudio: Updated to v{version}")
+                        else:
+                            print(f"   • Nerfstudio: Update failed, using v{version}")
+                    else:
+                        print(f"   • Nerfstudio: Installed (v{version}) - up to date")
+                except Exception as e:
+                    # Update check failed, but installation is fine
+                    print(f"   • Nerfstudio: Installed (v{version})")
+                
+                return True
+            
+            # Check for existing installation elsewhere (conda, system PATH)
+            existing = NerfstudioEnvironment.detect_existing()
+            if existing:
+                source, path = existing
+                print(f"   • Nerfstudio: Found existing {source} installation at {path}")
+                print(f"     (FreeFlow uses isolated venv inside project directory)")
+            
+            # Check if we should auto-install
+            # Note: Nerfstudio installation can take 10-30 minutes, so we show a clear message
+            print("   • Nerfstudio: Not installed in FreeFlow venv.")
+            
+            # Check prerequisites first
+            cuda_version = NerfstudioEnvironment._detect_cuda_version()
+            if cuda_version:
+                print(f"     CUDA {cuda_version} detected - GPU acceleration available")
+            else:
+                print("     WARNING: No CUDA detected - Splatfacto requires CUDA for reasonable performance")
+                print("     Training will be VERY slow on CPU. Consider using Brush engine instead.")
+            
+            # Auto-install with progress reporting
+            print("     Auto-installing Nerfstudio (this may take 10-30 minutes)...")
+            print(f"     Installation location: {NerfstudioEnvironment.VENV_PATH}")
+            
+            def progress_callback(message: str, progress: float):
+                """Progress callback for installation."""
+                pct = int(progress * 100)
+                print(f"     [{pct:3d}%] {message}")
+            
+            success = NerfstudioEnvironment.create_venv(progress_callback)
+            
+            if success:
+                version = NerfstudioEnvironment.get_version()
+                print(f"   • Nerfstudio: Installed successfully (v{version})")
+                return True
+            else:
+                print("   • Nerfstudio: Installation FAILED")
+                print("     Splatfacto engine will not be available.")
+                print("     You can retry manually: python -c \"from nodes.modules.nerfstudio_env import NerfstudioEnvironment; NerfstudioEnvironment.create_venv()\"")
+                return False
+                
+        except ImportError as e:
+            print(f"   • Nerfstudio: Module import error: {e}")
+            return False
+        except Exception as e:
+            print(f"   • Nerfstudio: Auto-install error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     @staticmethod
     def install_python_packages():
