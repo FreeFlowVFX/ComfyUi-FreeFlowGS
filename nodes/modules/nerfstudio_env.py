@@ -673,7 +673,7 @@ class NerfstudioEnvironment:
             return None
     
     # GitHub repository for pre-built gsplat wheels
-    GSPLAT_WHEELS_REPO = "anomalyco/ComfyUi-FreeFlowGS"
+    GSPLAT_WHEELS_REPO = "FreeFlowVFX/ComfyUi-FreeFlowGS"
     GSPLAT_VERSION = "1.5.3"
     
     @classmethod
