@@ -92,6 +92,8 @@ jobs:
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9"
           CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
           MAX_JOBS: "4"
+          # Required for PyTorch cpp_extension with MSVC
+          DISTUTILS_USE_SDK: "1"
         run: |
           Write-Host "=== Cloning gsplat v${{ github.event.inputs.gsplat_version }} from GitHub ==="
           git clone --depth 1 --branch v${{ github.event.inputs.gsplat_version }} https://github.com/nerfstudio-project/gsplat.git gsplat_src
@@ -101,6 +103,7 @@ jobs:
           Write-Host "CUDA_HOME: $env:CUDA_HOME"
           Write-Host "TORCH_CUDA_ARCH_LIST: $env:TORCH_CUDA_ARCH_LIST"
           Write-Host "MAX_JOBS: $env:MAX_JOBS"
+          Write-Host "DISTUTILS_USE_SDK: $env:DISTUTILS_USE_SDK"
           
           cd gsplat_src
           
