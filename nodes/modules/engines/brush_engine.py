@@ -83,15 +83,35 @@ class BrushEngine(IGSEngine):
             dataset_path: Path to COLMAP-format dataset
             output_path: Path to output PLY file
             params: Training parameters dict with keys:
+                Core:
                 - iterations: int (default 4000)
-                - splat_count: int (default 50000)
-                - learning_rate: float (default 0.0005)
+                - splat_count: int (default 500000)
+                - learning_rate: float (default 0.00002) - position LR
                 - sh_degree: int (default 3)
-                - growth_stop_iter: int (optional, for fixed topology)
-                - refine_every: int (optional, for fixed topology)
+                
+                Densification:
+                - densification_interval: int (default 200) -> --refine-every
+                - densify_grad_threshold: float (default 0.00004) -> --growth-grad-threshold
+                - growth_select_fraction: float (default 0.1) -> --growth-select-fraction
+                
+                Learning Rates:
+                - feature_lr: float (default 0.0025) -> --lr-coeffs-dc
+                - gaussian_lr: float (default 0.00016) -> --lr-scale (low for 4D stability)
+                - opacity_lr: float (default 0.01) -> --lr-opac
+                
+                Regularization:
+                - scale_loss_weight: float (default 1e-8) -> --scale-loss-weight
+                - opac_loss_weight: float (default 1e-9) -> --opac-loss-weight
+                
+                Fixed Topology:
+                - growth_stop_iter: int (optional) -> --growth-stop-iter
+                - refine_every: int (optional, legacy) -> --refine-every
+                
+                Visualization:
                 - visualize_training: str ("Off", "Save Preview Images", "Spawn Native GUI")
                 - preview_interval: int (steps between eval images)
                 - eval_camera_index: int (render every Nth camera)
+                
             prev_ply_path: Path to previous frame PLY for warm start
             mask_path: Not used by Brush (reserved for future)
             callback_data: Dict with 'pbar_func' for progress callback
@@ -105,7 +125,7 @@ class BrushEngine(IGSEngine):
         
         iterations = params.get('iterations', 4000)
         
-        # Build command
+        # Build command - Core required flags
         cmd = [
             str(self._brush_bin), 
             str(dataset_path),
@@ -115,15 +135,41 @@ class BrushEngine(IGSEngine):
             # Prevent intermediate exports triggering early kill
             "--export-every", str(iterations),
             
-            # Mapped Params
-            "--max-splats", str(params.get('splat_count', 50000)),
-            "--lr-mean", str(params.get('learning_rate', 0.0005)),
+            # Core Params (always passed)
+            "--max-splats", str(params.get('splat_count', 500000)),
+            "--lr-mean", str(params.get('learning_rate', 0.00002)),
             "--sh-degree", str(params.get('sh_degree', 3)),
         ]
         
+        # --- DENSIFICATION / REFINEMENT FLAGS ---
+        # These control splat growth behavior
+        if 'densification_interval' in params:
+            cmd.extend(["--refine-every", str(params['densification_interval'])])
+        if 'densify_grad_threshold' in params:
+            cmd.extend(["--growth-grad-threshold", str(params['densify_grad_threshold'])])
+        if 'growth_select_fraction' in params:
+            cmd.extend(["--growth-select-fraction", str(params['growth_select_fraction'])])
+        
+        # --- LEARNING RATE FLAGS ---
+        if 'feature_lr' in params:
+            cmd.extend(["--lr-coeffs-dc", str(params['feature_lr'])])
+        if 'gaussian_lr' in params:
+            cmd.extend(["--lr-scale", str(params['gaussian_lr'])])
+        if 'opacity_lr' in params:
+            cmd.extend(["--lr-opac", str(params['opacity_lr'])])
+        
+        # --- REGULARIZATION FLAGS ---
+        # These help prevent splat drift toward cameras
+        if 'scale_loss_weight' in params:
+            cmd.extend(["--scale-loss-weight", str(params['scale_loss_weight'])])
+        if 'opac_loss_weight' in params:
+            cmd.extend(["--opac-loss-weight", str(params['opac_loss_weight'])])
+        
         # --- FIXED TOPOLOGY CLI FLAGS ---
+        # For Cinema-Smooth mode: disable all growth after frame 0
         if 'growth_stop_iter' in params:
             cmd.extend(["--growth-stop-iter", str(params['growth_stop_iter'])])
+        # Legacy support: refine_every can also be set directly
         if 'refine_every' in params:
             cmd.extend(["--refine-every", str(params['refine_every'])])
         

@@ -64,8 +64,8 @@ class FreeFlow_AdaptiveEngine:
                 # --- 5. Advanced Optimization ---
                 "learning_rate": ("FLOAT", {"default": 0.00002, "min": 0.000001, "max": 0.001, "step": 0.000001, "tooltip": "Controls how fast point POSITIONS update. Lower = smoother, more stable results. Higher = faster convergence but may overshoot."}),
                 "densification_interval": ("INT", {"default": 200, "min": 10, "max": 1000, "tooltip": "How often to add/remove points (refinement). Lower = more aggressive point growth. Higher = more conservative, stable topology."}),
-                "opacity_reset_interval": ("INT", {"default": 5000, "min": 100, "max": 50000, "tooltip": "Periodically reset opacity to remove faint/invisible splats. Higher = more stable across frames. Lower = cleaner individual frames."}),
                 "densify_grad_threshold": ("FLOAT", {"default": 0.00004, "min": 0.000001, "max": 0.01, "step": 0.000001, "tooltip": "Gradient threshold to trigger point splitting. Lower = add more points (finer detail). Higher = fewer points (faster, coarser)."}),
+                "growth_select_fraction": ("FLOAT", {"default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Fraction of high-gradient points selected for densification. Lower = more selective growth. Higher = more aggressive point addition."}),
                 
                 # --- 6. Initialization & Selection ---
                 "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
@@ -76,7 +76,9 @@ class FreeFlow_AdaptiveEngine:
                 # --- 7. Efficiency & Advanced ---
                 "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Use filesystem links instead of copying images. Saves gigabytes of disk space. Disable if you have permission issues on Windows."}),
                 "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
-                "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Set very low (0.00016) for stable geometry. Higher values cause wobbling between frames."}),
+                "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. Set very low (0.00016) for stable geometry across frames."}),
+                "opacity_lr": ("FLOAT", {"default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001, "tooltip": "Learning rate for opacity values. Controls how fast transparency updates. Lower = more stable opacity."}),
+                "scale_loss_weight": ("FLOAT", {"default": 1e-8, "min": 0.0, "max": 1e-5, "step": 1e-9, "tooltip": "Regularization weight for scale loss. Higher values constrain splat sizes. Helps prevent overly large splats."}),
                 
                 # --- 8. Output ---
                 "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Custom folder for PLY output. Leave empty to use ComfyUI output folder. Use absolute path like D:/Project/Splats."}),
@@ -370,9 +372,9 @@ class FreeFlow_AdaptiveEngine:
                    topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False, realign_topology=True,
                    visualize_training="Off", preview_interval=500, eval_camera_index=10,
                    iterations=10000, learning_rate=0.0005, densification_interval=300,
-                   opacity_reset_interval=5000, densify_grad_threshold=0.0002, use_symlinks=True,
+                   densify_grad_threshold=0.0002, growth_select_fraction=0.1, use_symlinks=True,
                    frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3, 
-                   feature_lr=0.0025, gaussian_lr=0.00016,
+                   feature_lr=0.0025, gaussian_lr=0.00016, opacity_lr=0.01, scale_loss_weight=1e-8,
                    custom_output_path="", filename_prefix="FreeFlow", cleanup_work_dirs=True, 
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
                    unique_id=None, preview_camera_filter=""):
@@ -482,6 +484,9 @@ class FreeFlow_AdaptiveEngine:
                 print(f"   ⚠️ Warning: Anchor frame {target_anchor_id} not found in selected frames. Using default anchor.")
         
         # -------------------------
+        
+        # Pre-calculate topology mode (used in loop and after)
+        is_fixed_topology = "Fixed" in topology_mode
 
         for idx, i in enumerate(indices_to_process):
             # Get REAL frame number from actual image filename (not list index!)
@@ -551,6 +556,40 @@ class FreeFlow_AdaptiveEngine:
                 "--export-every", str(iterations), 
             ]
             
+            # --- CORE MODEL PARAMS ---
+            cmd.extend(["--max-splats", str(splat_count)])
+            cmd.extend(["--sh-degree", str(sh_degree)])
+            
+            # --- LEARNING RATES ---
+            # Position learning rate (most important for stability)
+            cmd.extend(["--lr-mean", str(learning_rate)])
+            
+            # Feature/color learning rate (SH coefficients)
+            cmd.extend(["--lr-coeffs-dc", str(feature_lr)])
+            
+            # Scale learning rate (gaussian size/shape)
+            cmd.extend(["--lr-scale", str(gaussian_lr)])
+            
+            # Opacity learning rate
+            cmd.extend(["--lr-opac", str(opacity_lr)])
+            
+            # --- REGULARIZATION ---
+            # Scale loss weight (prevents overly large splats)
+            cmd.extend(["--scale-loss-weight", str(scale_loss_weight)])
+            
+            # --- DENSIFICATION (Dynamic mode or Frame 0) ---
+            is_first_frame = (idx == 0)
+            
+            if not is_fixed_topology or is_first_frame:
+                # Densification interval (refine-every in Brush)
+                cmd.extend(["--refine-every", str(densification_interval)])
+                
+                # Gradient threshold for growth
+                cmd.extend(["--growth-grad-threshold", str(densify_grad_threshold)])
+                
+                # Fraction of points selected for growth
+                cmd.extend(["--growth-select-fraction", str(growth_select_fraction)])
+            
             # --- VISUALIZATION LOGIC ---
             if visualize_training == "Spawn Native GUI":
                 cmd.append("--with-viewer")
@@ -564,11 +603,9 @@ class FreeFlow_AdaptiveEngine:
                 cmd.extend(["--eval-split-every", str(eval_camera_index)]) 
                 print(f"   📸 Saving Preview Image every {preview_interval} steps (rendering camera index {eval_camera_index})...")
 
-            # --- FIXED TOPOLOGY LOGIC ---
-            is_fixed_topology = "Fixed" in topology_mode
-            
+            # --- FIXED TOPOLOGY LOGIC (Frames after anchor) ---
             # If Cinema-Smooth Mode enabled AND not the first processed frame (anchor)
-            if is_fixed_topology and idx > 0:
+            if is_fixed_topology and not is_first_frame:
                 # Force Freeze Topology: disable refinement and growth
                 # VALID Brush CLI flags (verified from brush --help):
                 #   --growth-stop-iter: "Period after which splat growth stops"

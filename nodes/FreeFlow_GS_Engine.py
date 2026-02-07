@@ -159,23 +159,31 @@ class FreeFlow_GS_Engine:
                 }),
                 "densification_interval": ("INT", {
                     "default": 200, "min": 10, "max": 1000,
-                    "tooltip": "[Brush] Steps between point refinement."
-                }),
-                "opacity_reset_interval": ("INT", {
-                    "default": 5000, "min": 100, "max": 50000,
-                    "tooltip": "[Brush] Steps between opacity resets."
+                    "tooltip": "[Brush] Steps between point refinement (--refine-every)."
                 }),
                 "densify_grad_threshold": ("FLOAT", {
                     "default": 0.00004, "min": 0.000001, "max": 0.01, "step": 0.000001,
-                    "tooltip": "[Brush] Gradient threshold for point splitting."
+                    "tooltip": "[Brush] Gradient threshold for point splitting. Lower = more aggressive growth."
+                }),
+                "growth_select_fraction": ("FLOAT", {
+                    "default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01,
+                    "tooltip": "[Brush] Fraction of splats that grow when needed. Lower = less aggressive (helps prevent drift)."
                 }),
                 "feature_lr": ("FLOAT", {
                     "default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001,
-                    "tooltip": "[Brush] Color/feature learning rate."
+                    "tooltip": "[Brush] Color/SH coefficient learning rate (--lr-coeffs-dc)."
                 }),
                 "gaussian_lr": ("FLOAT", {
                     "default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001,
-                    "tooltip": "[Brush] Gaussian size/shape learning rate."
+                    "tooltip": "[Brush] Scale/shape learning rate (--lr-scale). Very low (0.00016) for stable 4D geometry."
+                }),
+                "opacity_lr": ("FLOAT", {
+                    "default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001,
+                    "tooltip": "[Brush] Opacity learning rate (--lr-opac)."
+                }),
+                "scale_loss_weight": ("FLOAT", {
+                    "default": 1e-8, "min": 1e-10, "max": 1e-5, "step": 1e-9,
+                    "tooltip": "[Brush] Scale regularization weight. Higher = prevents splat explosion/drift toward cameras."
                 }),
                 "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {
                     "default": "Optical Flow (Robust)",
@@ -1371,6 +1379,26 @@ class FreeFlow_GS_Engine:
                     'visualize_training': visualize_training,
                     'preview_interval': preview_interval,
                     'eval_camera_index': kwargs.get('eval_camera_index', 10),
+                })
+                
+                # --- DENSIFICATION PARAMS (only in Dynamic mode) ---
+                if not is_fixed_topology or idx_seq == 0:
+                    params.update({
+                        'densification_interval': kwargs.get('densification_interval', 200),
+                        'densify_grad_threshold': kwargs.get('densify_grad_threshold', 0.00004),
+                        'growth_select_fraction': kwargs.get('growth_select_fraction', 0.1),
+                    })
+                
+                # --- LEARNING RATE PARAMS ---
+                params.update({
+                    'feature_lr': kwargs.get('feature_lr', 0.0025),
+                    'gaussian_lr': kwargs.get('gaussian_lr', 0.00016),
+                    'opacity_lr': kwargs.get('opacity_lr', 0.01),
+                })
+                
+                # --- REGULARIZATION PARAMS (help prevent camera drift) ---
+                params.update({
+                    'scale_loss_weight': kwargs.get('scale_loss_weight', 1e-8),
                 })
                 
                 # Add Fixed Topology CLI flags for Brush if enabled AND not first frame
