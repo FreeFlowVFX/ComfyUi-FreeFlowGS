@@ -1525,6 +1525,10 @@ class FreeFlow_GS_Engine:
                 if visualize_training == "Save Preview Images" and unique_id:
                     self._preview_step_counter[frame_name] = 0
                 
+                # Pass nerfstudio checkpoint from previous frame for true warm start
+                if is_splatfacto and hasattr(engine, 'last_checkpoint_dir') and engine.last_checkpoint_dir:
+                    params['nerfstudio_checkpoint_dir'] = str(engine.last_checkpoint_dir)
+                
                 success = engine.train(
                     dataset_path=frame_work_dir, 
                     output_path=ply_out, 

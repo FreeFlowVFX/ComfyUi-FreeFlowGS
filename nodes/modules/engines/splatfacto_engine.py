@@ -41,6 +41,7 @@ class SplatfactoEngine(IGSEngine):
         """Initialize SplatfactoEngine and check environment."""
         self._env = None
         self._init_error = None
+        self.last_checkpoint_dir = None  # Stores checkpoint dir from last successful training
         
         try:
             from ..nerfstudio_env import NerfstudioEnvironment
@@ -197,20 +198,33 @@ class SplatfactoEngine(IGSEngine):
             cmd.append("--pipeline.model.continue_cull_post_densification=False")
         
         # --- WARM START ---
-        # Load from previous checkpoint if provided
-        if prev_ply_path and Path(prev_ply_path).exists():
-            # prev_ply_path should be path to nerfstudio checkpoint directory
-            checkpoint_dir = Path(prev_ply_path)
-            if checkpoint_dir.is_dir():
-                cmd.extend(["--load-dir", str(checkpoint_dir)])
+        # Load from previous nerfstudio checkpoint directory if available
+        # This enables true warm start: transfers learned colors, opacities, covariances
+        # (not just positions like the points3D.txt seeding approach)
+        nerfstudio_checkpoint_dir = params.get('nerfstudio_checkpoint_dir')
+        if nerfstudio_checkpoint_dir and Path(nerfstudio_checkpoint_dir).is_dir():
+            cmd.extend(["--load-dir", str(nerfstudio_checkpoint_dir)])
+            print(f"[SplatfactoEngine] Warm start from checkpoint: {nerfstudio_checkpoint_dir}")
+        elif prev_ply_path and Path(prev_ply_path).exists():
+            # PLY file can't be loaded directly as checkpoint - points3D.txt seeding
+            # is handled by the orchestrator before calling train()
+            print(f"[SplatfactoEngine] Using points3D.txt seeding for initialization")
         
         # --- VIEWER / VISUALIZATION SETTINGS ---
         if visualize_mode == "Spawn Native GUI":
-            # Enable Viser web viewer (opens browser to http://localhost:7007)
+            # Enable Viser web viewer and auto-open browser
             cmd.extend(["--vis", "viewer"])
             viewer_port = params.get('viewer_port', 7007)
             cmd.append(f"--viewer.websocket-port={viewer_port}")
             print(f"[SplatfactoEngine] Viser viewer enabled at http://localhost:{viewer_port}")
+            # Auto-open browser after a short delay (give viser time to start)
+            def open_viewer_browser(port):
+                time.sleep(5)  # Wait for viser server to start
+                import webbrowser
+                webbrowser.open(f"http://localhost:{port}")
+                print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
+            browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
+            browser_thread.start()
         elif visualize_mode == "Save Preview Images":
             # Use tensorboard for logging + enable eval image saving
             cmd.extend(["--vis", "tensorboard"])
@@ -218,10 +232,9 @@ class SplatfactoEngine(IGSEngine):
             cmd.extend(["--steps-per-eval-image", str(preview_interval)])
             print(f"[SplatfactoEngine] Preview images will be saved every {preview_interval} steps")
         else:
-            # Off - minimal logging, no viewer
+            # Off - no interactive viewer, minimal logging
+            # tensorboard mode doesn't spawn a server, just logs to disk
             cmd.extend(["--vis", "tensorboard"])
-            # Disable frequent eval to speed up training
-            cmd.extend(["--steps-per-eval-image", "0"])
         
         # --- LOGGING ---
         # Set experiment name for organized outputs
@@ -289,17 +302,13 @@ class SplatfactoEngine(IGSEngine):
             progress_thread = threading.Thread(target=parse_progress, daemon=True)
             progress_thread.start()
             
-            # Progress callback simulation (if provided)
+            # Progress callback - pass process to pbar_func (same pattern as Brush)
+            # pbar_func(process) runs _pbar_simulator which monitors process.poll()
             if callback_data and callback_data.get('pbar_func'):
-                def progress_reporter():
-                    while process.poll() is None:
-                        if progress_info['total'] > 0:
-                            pct = progress_info['current'] / progress_info['total']
-                            # callback_data['pbar_func'] expects process, but we'll adapt
-                        time.sleep(1)
-                
-                reporter_thread = threading.Thread(target=progress_reporter, daemon=True)
-                reporter_thread.start()
+                pbar_thread = threading.Thread(
+                    target=callback_data['pbar_func'], args=(process,), daemon=True
+                )
+                pbar_thread.start()
             
             # --- PREVIEW MONITORING THREAD ---
             # Monitor for eval images and copy them to TrainingPreviews folder
@@ -394,12 +403,20 @@ class SplatfactoEngine(IGSEngine):
             
             progress_thread.join(timeout=5)
             
-            if process.returncode != 0:
-                print(f"[SplatfactoEngine] Training failed with return code {process.returncode}")
-                return False
-            
             # Find the config.yml for export
+            # Check for config BEFORE checking return code, because on Windows
+            # nerfstudio often crashes during cleanup with heap corruption (0xC0000374)
+            # even though training completed successfully
             config_path = self._find_config(nerfstudio_output_dir, experiment_name)
+            
+            if process.returncode != 0:
+                print(f"[SplatfactoEngine] ns-train exited with return code {process.returncode}")
+                if config_path:
+                    print(f"[SplatfactoEngine] Training output found despite exit code - continuing to export")
+                else:
+                    print(f"[SplatfactoEngine] Training failed - no output found")
+                    return False
+            
             if not config_path:
                 print("[SplatfactoEngine] Error: Could not find config.yml after training")
                 return False
@@ -409,6 +426,12 @@ class SplatfactoEngine(IGSEngine):
             if not export_success:
                 print("[SplatfactoEngine] Error: PLY export failed")
                 return False
+            
+            # Store checkpoint dir for warm start on next frame
+            checkpoint_dir = self.get_checkpoint_path(nerfstudio_output_dir, experiment_name)
+            if checkpoint_dir:
+                self.last_checkpoint_dir = checkpoint_dir
+                print(f"[SplatfactoEngine] Checkpoint saved for warm start: {checkpoint_dir}")
             
             print(f"[SplatfactoEngine] Success! PLY exported to {output_path}")
             return True
@@ -502,7 +525,6 @@ class SplatfactoEngine(IGSEngine):
             source_ply = exported_plys[0]
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            import shutil
             shutil.move(str(source_ply), str(output_path))
             
             # Cleanup temp export dir
