@@ -161,8 +161,9 @@ jobs:
       - name: Create wheel with compiled extension
         shell: pwsh
         run: |
-          $site_packages = python -c "import site; print(site.getsitepackages()[0])"
           $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
+          # Derive site-packages from gsplat path (gsplat is installed in site-packages/gsplat)
+          $site_packages = Split-Path -Parent $gsplat_path
           
           Write-Host "Site packages: $site_packages"
           Write-Host "gsplat path: $gsplat_path"
@@ -193,12 +194,17 @@ jobs:
           Copy-Item -Path $gsplat_path -Destination "$wheel_temp\gsplat" -Recurse
           
           # Copy dist-info for proper wheel metadata
+          Write-Host ""
+          Write-Host "Looking for gsplat dist-info in: $site_packages"
           $dist_info = Get-ChildItem -Path $site_packages -Filter "gsplat-*.dist-info" | Select-Object -First 1
           if ($dist_info) {
             Copy-Item -Path $dist_info.FullName -Destination "$wheel_temp\$($dist_info.Name)" -Recurse
             Write-Host "Copied dist-info: $($dist_info.Name)"
           } else {
-            Write-Error "WARNING: No dist-info found for gsplat"
+            Write-Host "Available directories in site-packages:"
+            Get-ChildItem -Path $site_packages -Directory | Where-Object { $_.Name -like "*gsplat*" -or $_.Name -like "*dist-info*" } | ForEach-Object { Write-Host "  $($_.Name)" }
+            Write-Error "FATAL: No gsplat-*.dist-info found in $site_packages"
+            exit 1
           }
           
           # Create the wheel
