@@ -761,10 +761,12 @@ class NerfstudioEnvironment:
             print(f"[NerfstudioEnv] Windows detected - trying pre-built gsplat wheel...")
             
             # Construct wheel URL from our GitHub releases
-            # Format: gsplat-{version}-py{py_version}-{cuda}.whl
-            # Example: gsplat-1.5.3-py3.11-cu124.whl
-            wheel_name = f"gsplat-{cls.GSPLAT_VERSION}-py{py_version}-{cuda_suffix}.whl"
-            wheel_url = f"https://github.com/{cls.GSPLAT_WHEELS_REPO}/releases/download/gsplat-v{cls.GSPLAT_VERSION}-{cuda_suffix}/{wheel_name}"
+            # Standard wheel naming: gsplat-{version}+{cuda}-cp{pyver}-cp{pyver}-win_amd64.whl
+            # Example: gsplat-1.5.3+cu124-cp311-cp311-win_amd64.whl
+            py_ver_short = py_version.replace(".", "")  # "3.11" -> "311"
+            wheel_name = f"gsplat-{cls.GSPLAT_VERSION}+{cuda_suffix}-cp{py_ver_short}-cp{py_ver_short}-win_amd64.whl"
+            # URL-encode the + as %2B for the download URL
+            wheel_url = f"https://github.com/{cls.GSPLAT_WHEELS_REPO}/releases/download/gsplat-v{cls.GSPLAT_VERSION}-{cuda_suffix}/{wheel_name.replace('+', '%2B')}"
             
             print(f"[NerfstudioEnv] Trying wheel: {wheel_url}")
             
