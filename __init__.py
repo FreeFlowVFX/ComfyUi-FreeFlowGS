@@ -41,7 +41,7 @@ try:
     
     # --- OS & Dependency Checks ---
     print("\n" + "="*50)
-    print("🌊 Initializing FreeFlow 4D (Cinema Splats)")
+    print("🌊 Initializing FreeFlow 4D Splats")
     print(f"   • OS Detected: {FreeFlowUtils.get_os()}")
     
     # STARTUP VERSION CHECK (Threaded)
@@ -124,7 +124,7 @@ try:
         "FreeFlow_InteractivePlayer": "FreeFlow 4D Player",
         "FreeFlow_PLYSequenceLoader": "FreeFlow PLY Sequence Loader",
         "FreeFlow_PostProcessSmoother": "FreeFlow Post-Process Smoother (Savitzky-Golay)",
-        "FreeFlow_GS_Engine": "FreeFlow GS Engine (Cinema)",
+        "FreeFlow_GS_Engine": "FreeFlow GS Engine (4D)",
         "FreeFlow_FlameTracker": "FreeFlow 3D/Face Tracker (Auto-Rig)",
         "FreeFlow_MeshLoader": "FreeFlow External Mesh Loader (Metahuman)"
     }

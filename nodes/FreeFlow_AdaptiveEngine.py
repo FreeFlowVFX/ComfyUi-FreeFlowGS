@@ -52,7 +52,7 @@ class FreeFlow_AdaptiveEngine:
                 "eval_camera_index": ("INT", {"default": 10, "min": 1, "max": 100, "tooltip": "Render every Nth camera for preview. With 16 cameras: 1=all, 8=cam0+cam8. Higher values = faster previews."}),
 
                 # --- 3. Topology Control ---
-                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
+                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Stable)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
                 "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay temporal filter to smooth point positions across frames. Eliminates jitter. REQUIRES Fixed Topology mode."}),
                 "realign_topology": ("BOOLEAN", {"default": True, "tooltip": "Re-align point IDs using nearest-neighbor matching before smoothing. Fixes point order shuffling from Brush. Disable only for debugging."}),
                 
@@ -604,7 +604,7 @@ class FreeFlow_AdaptiveEngine:
                 print(f"   📸 Saving Preview Image every {preview_interval} steps (rendering camera index {eval_camera_index})...")
 
             # --- FIXED TOPOLOGY LOGIC (Frames after anchor) ---
-            # If Cinema-Smooth Mode enabled AND not the first processed frame (anchor)
+            # If Stable Mode enabled AND not the first processed frame (anchor)
             if is_fixed_topology and not is_first_frame:
                 # Force Freeze Topology: disable refinement and growth
                 # VALID Brush CLI flags (verified from brush --help):
@@ -763,7 +763,7 @@ class FreeFlow_AdaptiveEngine:
             if cleanup_work_dirs:
                 shutil.rmtree(frame_work_dir, ignore_errors=True)
                 
-        # --- POST-PROCESS: TEMPORAL SMOOTHING (Cinema-Smooth) ---
+        # --- POST-PROCESS: TEMPORAL SMOOTHING (Stable) ---
         if apply_smoothing:
             if is_fixed_topology and len(indices_to_process) > 3:
                 FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
@@ -774,7 +774,7 @@ class FreeFlow_AdaptiveEngine:
                     FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
             else:
                 if not is_fixed_topology:
-                     FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Cinema-Smooth)' topology used.", "WARN")
+                     FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology used.", "WARN")
                 else:
                      FreeFlowUtils.log("⚠️ Smoothing skipped: Sequence too short (<4 frames).", "WARN")
                 

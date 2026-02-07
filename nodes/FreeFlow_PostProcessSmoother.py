@@ -87,7 +87,7 @@ class FreeFlow_PostProcessSmoother:
         # Ideally we smooth EVERYTHING.
         # A standard splat has: x,y,z, nx,ny,nz, f_dc_0,1,2, f_rest..., opac, scale_0,1,2, rot_0,1,2
         # That's a lot of floats.
-        # For "Cinema Smooth", visual stability mostly comes from XYZ. 
+        # For "Stable mode", visual stability mostly comes from XYZ. 
         # Scaling jitter is also bad.
         
         # Strategy: Load ALL floats into a massive buffer (T, N, D).

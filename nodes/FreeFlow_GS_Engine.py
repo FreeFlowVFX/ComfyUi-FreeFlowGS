@@ -1,5 +1,5 @@
 """
-FreeFlow_GS_Engine - Cinema Quality Training Node
+FreeFlow_GS_Engine - 4D Quality Training Node
 Extends AdaptiveEngine with Rig-Guided Warm Start functionality.
 
 Supports multiple backends:
@@ -140,7 +140,7 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 # TOPOLOGY CONTROL [SHARED]
                 # ═══════════════════════════════════════════════════════════════
-                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Cinema-Smooth)"], {
+                "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Stable)"], {
                     "default": "Dynamic (Default-Flicker)",
                     "tooltip": "Dynamic: Points grow/shrink freely (may flicker). Fixed: Lock topology after Frame 0 for smooth video."
                 }),
@@ -1140,7 +1140,7 @@ class FreeFlow_GS_Engine:
             raise ValueError(f"Unknown engine: {engine_backend}")
              
         # 2. Setup Output
-        filename_prefix = kwargs.get("filename_prefix", "FreeFlow_Cinema")
+        filename_prefix = kwargs.get("filename_prefix", "FreeFlow_4D")
         custom_out = kwargs.get("custom_output_path", "")
         if custom_out.strip(): output_dir = Path(os.path.expanduser(custom_out.strip()))
         else: output_dir = Path(folder_paths.get_output_directory()) / f"{filename_prefix}_{int(time.time())}"
@@ -1574,7 +1574,7 @@ class FreeFlow_GS_Engine:
             if kwargs.get("cleanup_work_dirs", True):
                 shutil.rmtree(frame_work_dir, ignore_errors=True)
 
-        # --- POST-PROCESS: TEMPORAL SMOOTHING (Cinema-Smooth) ---
+        # --- POST-PROCESS: TEMPORAL SMOOTHING (Stable) ---
         if apply_smoothing:
             if is_fixed_topology and len(indices_to_process) > 3:
                 FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
@@ -1585,7 +1585,7 @@ class FreeFlow_GS_Engine:
                     FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
             else:
                 if not is_fixed_topology:
-                    FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Cinema-Smooth)' topology used.", "WARN")
+                    FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology used.", "WARN")
                 else:
                     FreeFlowUtils.log("⚠️ Smoothing skipped: Sequence too short (<4 frames).", "WARN")
 

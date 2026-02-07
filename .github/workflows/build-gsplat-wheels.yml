@@ -18,10 +18,6 @@ on:
         description: 'gsplat version to build (e.g., 1.5.3)'
         required: true
         default: '1.5.3'
-      torch_version:
-        description: 'PyTorch version (e.g., 2.5.1)'
-        required: true
-        default: '2.5.1'
       cuda_version:
         description: 'CUDA version for wheel suffix'
         required: true
@@ -39,6 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.11', '3.12']
+        torch-version: ['2.5.1', '2.6.0']
     
     steps:
       - name: Checkout FreeFlow repo
@@ -75,7 +72,7 @@ jobs:
       - name: Install PyTorch with CUDA
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install torch==${{ github.event.inputs.torch_version }} --index-url https://download.pytorch.org/whl/${{ github.event.inputs.cuda_version }}
+          python -m pip install torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/${{ github.event.inputs.cuda_version }}
 
       - name: Verify PyTorch CUDA
         run: |
@@ -210,9 +207,10 @@ jobs:
           # Create the wheel
           $version = "${{ github.event.inputs.gsplat_version }}"
           $py_ver = "${{ matrix.python-version }}" -replace '\.', ''
+          $torch_ver = "${{ matrix.torch-version }}" -replace '\.', ''
           $cuda_ver = "${{ github.event.inputs.cuda_version }}"
-          # Use proper wheel naming: gsplat-1.5.3+cu124-cp311-cp311-win_amd64.whl
-          $wheel_name = "gsplat-${version}+${cuda_ver}-cp${py_ver}-cp${py_ver}-win_amd64.whl"
+          # Wheel naming with PyTorch version: gsplat-1.5.3+pt260cu124-cp312-cp312-win_amd64.whl
+          $wheel_name = "gsplat-${version}+pt${torch_ver}${cuda_ver}-cp${py_ver}-cp${py_ver}-win_amd64.whl"
           
           Write-Host ""
           Write-Host "Creating wheel: $wheel_name"
@@ -271,7 +269,7 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gsplat-win-py${{ matrix.python-version }}-${{ github.event.inputs.cuda_version }}
+          name: gsplat-win-py${{ matrix.python-version }}-pt${{ matrix.torch-version }}-${{ github.event.inputs.cuda_version }}
           path: dist/*.whl
           retention-days: 90
 
@@ -309,7 +307,7 @@ jobs:
             ## Pre-compiled gsplat ${{ github.event.inputs.gsplat_version }} wheels for Windows
             
             **Built with:**
-            - PyTorch ${{ github.event.inputs.torch_version }}
+            - PyTorch 2.5.1 and 2.6.0
             - CUDA ${{ github.event.inputs.cuda_version }}
             - Python 3.11 and 3.12
             - CUDA architectures: 7.5, 8.0, 8.6, 8.9 (RTX 20xx through 40xx)
@@ -319,8 +317,13 @@ jobs:
             - Building from source requires MSVC (Visual Studio Build Tools)
             - These wheels include pre-compiled CUDA kernels (`csrc.pyd`)
             
+            **Wheel naming convention:**
+            `gsplat-{version}+pt{pytorch}cu{cuda}-cp{python}-cp{python}-win_amd64.whl`
+            
+            Example: `gsplat-1.5.3+pt260cu124-cp312-cp312-win_amd64.whl` = PyTorch 2.6.0, CUDA 12.4, Python 3.12
+            
             **Installation:**
-            FreeFlow GS Engine will automatically download the correct wheel.
+            FreeFlow GS Engine will automatically download the correct wheel based on your PyTorch version.
             
             Manual install:
             ```

@@ -74,7 +74,7 @@ class BrushEngine(IGSEngine):
         Constructs and runs the 'brush train' command.
         
         Supports:
-        - Fixed Topology CLI flags for Cinema-Smooth mode
+        - Fixed Topology CLI flags for Stable mode
         - Warm Start via --init flag
         - Progress callbacks
         - Visualization modes: Native GUI, Save Preview Images
@@ -166,7 +166,7 @@ class BrushEngine(IGSEngine):
             cmd.extend(["--opac-loss-weight", str(params['opac_loss_weight'])])
         
         # --- FIXED TOPOLOGY CLI FLAGS ---
-        # For Cinema-Smooth mode: disable all growth after frame 0
+        # For Stable mode: disable all growth after frame 0
         if 'growth_stop_iter' in params:
             cmd.extend(["--growth-stop-iter", str(params['growth_stop_iter'])])
         # Legacy support: refine_every can also be set directly
