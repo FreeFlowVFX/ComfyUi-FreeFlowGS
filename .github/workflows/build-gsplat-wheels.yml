@@ -87,7 +87,9 @@ jobs:
 
       - name: Install gsplat from source (triggers CUDA compilation)
         env:
-          TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
+          # Note: Removed 7.0 (too old) and 9.0 (Hopper - compilation issues)
+          # 7.5 = Turing (RTX 20xx), 8.0 = Ampere (A100), 8.6 = Ampere (RTX 30xx), 8.9 = Ada (RTX 40xx)
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9"
           CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
           MAX_JOBS: "4"
         run: |
@@ -97,7 +99,9 @@ jobs:
 
       - name: Trigger CUDA kernel compilation
         env:
-          TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
+          # Note: Removed 9.0 (Hopper) due to compilation issues with glm library
+          # 8.9 covers RTX 40xx series (Ada Lovelace)
+          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9"
           CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
           echo "Triggering gsplat CUDA kernel compilation..."
