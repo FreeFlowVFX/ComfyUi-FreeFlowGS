@@ -95,80 +95,139 @@ jobs:
           python -m pip install gsplat==${{ github.event.inputs.gsplat_version }} -v --no-build-isolation
           echo "Installation complete!"
 
-      - name: Verify gsplat compiled correctly
+      - name: Trigger CUDA kernel compilation
+        env:
+          TORCH_CUDA_ARCH_LIST: "7.0;7.5;8.0;8.6;8.9;9.0"
+          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
         run: |
-          python -c "import gsplat; print(f'gsplat version: {gsplat.__version__}')"
-          python -c "import gsplat; print(f'gsplat path: {gsplat.__path__}')"
-          dir "%LOCALAPPDATA%\torch_extensions" /s /b 2>nul || echo "No torch_extensions cache"
-        shell: cmd
+          echo "Triggering gsplat CUDA kernel compilation..."
+          python -c "
+          import torch
+          
+          # Force gsplat to compile its CUDA kernels by importing and using them
+          print('Importing gsplat...')
+          import gsplat
+          print(f'gsplat version: {gsplat.__version__}')
+          
+          # Import the cuda backend which triggers JIT compilation
+          print('Triggering CUDA kernel compilation (this may take a few minutes)...')
+          from gsplat.cuda._backend import _C
+          print('CUDA kernels compiled successfully!')
+          print(f'_C module: {_C}')
+          "
 
-      - name: List gsplat package contents
+      - name: Verify compiled extensions exist
         shell: pwsh
         run: |
-          $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
-          Write-Host "gsplat installed at: $gsplat_path"
-          Get-ChildItem -Path $gsplat_path -Recurse | ForEach-Object { Write-Host $_.FullName }
+          echo "Checking for compiled extensions..."
+          $torch_ext = "$env:LOCALAPPDATA\torch_extensions"
+          if (Test-Path $torch_ext) {
+            echo "torch_extensions cache found at: $torch_ext"
+            Get-ChildItem -Path $torch_ext -Recurse -Filter "*.pyd" | ForEach-Object { 
+              echo "Found compiled extension: $($_.FullName)"
+            }
+          } else {
+            echo "ERROR: No torch_extensions cache found!"
+            exit 1
+          }
 
-      - name: Create wheel from installed package
+      - name: Create wheel with compiled extensions
         shell: pwsh
         run: |
-          # Get site-packages path
+          # Get paths
           $site_packages = python -c "import site; print(site.getsitepackages()[0])"
           $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
+          $torch_ext = "$env:LOCALAPPDATA\torch_extensions"
           
           Write-Host "Site packages: $site_packages"
           Write-Host "gsplat path: $gsplat_path"
+          Write-Host "torch_extensions: $torch_ext"
           
-          # Check for .pyd files (compiled extensions)
-          $pyd_files = Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd"
-          if ($pyd_files) {
-            Write-Host "Found compiled .pyd files:"
-            $pyd_files | ForEach-Object { Write-Host "  $_" }
-          } else {
-            Write-Host "WARNING: No .pyd files found in gsplat package!"
-            # Check torch_extensions cache
-            $cache_path = "$env:LOCALAPPDATA\torch_extensions"
-            if (Test-Path $cache_path) {
-              Write-Host "Checking torch_extensions cache..."
-              Get-ChildItem -Path $cache_path -Recurse -Filter "*.pyd" | ForEach-Object { Write-Host "  $_" }
-            }
+          # Find the compiled .pyd file
+          $pyd_files = Get-ChildItem -Path $torch_ext -Recurse -Filter "*.pyd"
+          if (-not $pyd_files) {
+            Write-Error "No compiled .pyd files found in torch_extensions!"
+            exit 1
           }
+          
+          Write-Host "Found compiled extensions:"
+          $pyd_files | ForEach-Object { Write-Host "  $($_.FullName)" }
+          
+          # Copy compiled extension into gsplat package as csrc.pyd
+          $csrc_pyd = $pyd_files | Select-Object -First 1
+          $dest = Join-Path $gsplat_path "csrc.pyd"
+          Copy-Item $csrc_pyd.FullName -Destination $dest -Force
+          Write-Host "Copied $($csrc_pyd.FullName) -> $dest"
+          
+          # Also need to copy to gsplat/cuda/ for the import to work
+          $cuda_dest = Join-Path $gsplat_path "cuda\csrc.pyd"
+          Copy-Item $csrc_pyd.FullName -Destination $cuda_dest -Force
+          Write-Host "Copied $($csrc_pyd.FullName) -> $cuda_dest"
+          
+          # Verify the files are in place
+          Write-Host ""
+          Write-Host "gsplat package contents after copying:"
+          Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd" | ForEach-Object { Write-Host "  $($_.FullName)" }
           
           # Create wheel directory
           New-Item -ItemType Directory -Force -Path dist
           
-          # Use pip to create wheel from the installed package directory
-          python -m pip wheel "$gsplat_path" --no-deps --wheel-dir ./dist
+          # Create wheel from the modified gsplat package
+          # First, we need to create a proper wheel structure
+          $wheel_temp = "wheel_build"
+          New-Item -ItemType Directory -Force -Path $wheel_temp
           
-          # List created wheels
-          Write-Host "Created wheels:"
-          Get-ChildItem -Path dist -Filter "*.whl" | ForEach-Object { Write-Host "  $_" }
-
-      - name: Rename wheel with platform tags
-        shell: pwsh
-        run: |
-          $wheel = Get-ChildItem -Path dist -Filter "*.whl" | Select-Object -First 1
-          if (-not $wheel) {
-            Write-Error "No wheel found!"
-            exit 1
+          # Copy gsplat package
+          Copy-Item -Path $gsplat_path -Destination "$wheel_temp\gsplat" -Recurse
+          
+          # Get package metadata
+          $dist_info = Get-ChildItem -Path $site_packages -Filter "gsplat-*.dist-info" | Select-Object -First 1
+          if ($dist_info) {
+            Copy-Item -Path $dist_info.FullName -Destination "$wheel_temp\$($dist_info.Name)" -Recurse
+            Write-Host "Copied dist-info: $($dist_info.Name)"
           }
           
-          $cuda_ver = "${{ github.event.inputs.cuda_version }}"
+          # Create the wheel using zipfile
+          $version = "${{ github.event.inputs.gsplat_version }}"
           $py_ver = "${{ matrix.python-version }}"
-          $new_name = "gsplat-${{ github.event.inputs.gsplat_version }}-py${py_ver}-${cuda_ver}.whl"
+          $cuda_ver = "${{ github.event.inputs.cuda_version }}"
+          $wheel_name = "gsplat-${version}-py${py_ver}-${cuda_ver}.whl"
           
-          Write-Host "Renaming $($wheel.Name) to $new_name"
-          Rename-Item $wheel.FullName -NewName $new_name
+          python -c @"
+          import zipfile
+          import os
           
-          # Verify
+          wheel_path = 'dist/$wheel_name'
+          with zipfile.ZipFile(wheel_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+              for root, dirs, files in os.walk('wheel_build'):
+                  for file in files:
+                      file_path = os.path.join(root, file)
+                      arc_name = os.path.relpath(file_path, 'wheel_build')
+                      zf.write(file_path, arc_name)
+                      print(f'Added: {arc_name}')
+          print(f'Created wheel: {wheel_path}')
+          "@
+          
+          Write-Host ""
+          Write-Host "Created wheel:"
           Get-ChildItem -Path dist -Filter "*.whl"
 
-      - name: Inspect wheel contents
+      - name: Verify wheel contains compiled extension
         shell: pwsh
         run: |
           $wheel = Get-ChildItem -Path dist -Filter "*.whl" | Select-Object -First 1
-          Write-Host "Wheel contents:"
-          python -m zipfile -l $wheel.FullName
+          Write-Host "Inspecting wheel: $($wheel.Name)"
+          Write-Host ""
+          
+          # List all .pyd files in the wheel
+          $pyd_in_wheel = python -m zipfile -l $wheel.FullName | Select-String "\.pyd"
+          if ($pyd_in_wheel) {
+            Write-Host "Compiled extensions in wheel:"
+            $pyd_in_wheel | ForEach-Object { Write-Host "  $_" }
+          } else {
+            Write-Error "ERROR: No .pyd files found in wheel!"
+            exit 1
+          }
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
