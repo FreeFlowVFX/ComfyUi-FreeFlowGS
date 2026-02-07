@@ -1313,9 +1313,10 @@ class FreeFlow_GS_Engine:
             
             # Add Splatfacto-specific params if using that engine
             if is_splatfacto:
-                # Setup preview directory for organized previews
+                # Setup preview directory only in Save Preview mode
                 previews_dir = output_dir / "TrainingPreviews" / frame_name
-                previews_dir.mkdir(parents=True, exist_ok=True)
+                if visualize_training == "Save Preview Images":
+                    previews_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Create preview callback for websocket events
                 def make_splatfacto_preview_callback(uid, frame_nm, prev_dir):

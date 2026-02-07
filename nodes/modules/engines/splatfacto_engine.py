@@ -277,7 +277,11 @@ class SplatfactoEngine(IGSEngine):
             )
             
             # Progress parsing in background thread
-            progress_info = {'current': 0, 'total': params.get('iterations', 30000)}
+            progress_info = {
+                'current': 0, 
+                'total': params.get('iterations', 30000),
+                'training_complete': False
+            }
             
             def parse_progress():
                 """Parse nerfstudio output for progress updates."""
@@ -294,6 +298,12 @@ class SplatfactoEngine(IGSEngine):
                     loss_match = re.search(r'loss:\s*([\d.e+-]+)', line, re.IGNORECASE)
                     if loss_match:
                         progress_info['loss'] = float(loss_match.group(1))
+                    
+                    # Detect training completion
+                    # Nerfstudio prints "Training Finished" when done but the Viser
+                    # viewer keeps the process alive waiting for ctrl+c
+                    if "Training Finished" in line:
+                        progress_info['training_complete'] = True
                     
                     # Print output for debugging
                     print(f"[ns-train] {line.rstrip()}")
@@ -385,9 +395,24 @@ class SplatfactoEngine(IGSEngine):
                 print(f"[SplatfactoEngine] Preview monitoring started for {nerfstudio_output_dir}")
             
             # Wait for completion with interrupt checking
+            # Nerfstudio's Viser viewer keeps the process alive after training finishes.
+            # We detect "Training Finished" in the output and terminate after a grace period
+            # to ensure checkpoints are fully saved to disk.
             import comfy.model_management
             try:
                 while process.poll() is None:
+                    # Check for training completion (Viser keeps process alive)
+                    if progress_info.get('training_complete'):
+                        time.sleep(3)  # Grace period for checkpoint save
+                        if process.poll() is None:
+                            print("[SplatfactoEngine] Training complete, terminating process...")
+                            process.terminate()
+                            try:
+                                process.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                            break
+                    
                     if comfy.model_management.processing_interrupted():
                         process.terminate()
                         print("🚫 Processing Interrupted by User. Terminating Splatfacto...")
