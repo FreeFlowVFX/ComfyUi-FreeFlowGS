@@ -5,9 +5,9 @@
 # - macOS: gsplat requires CUDA which doesn't exist on Mac
 # - Windows: NO pre-built wheels exist, and MSVC is required for JIT compilation
 #
-# CRITICAL: gsplat uses JIT compilation by default. To create a wheel with
-# pre-compiled CUDA kernels, we must install gsplat (triggers compilation),
-# then repackage the site-packages folder including the compiled .pyd files.
+# CRITICAL: Building from git source via setup.py includes the -diag-suppress flags
+# needed to compile cleanly. The PyPI source dist + JIT compilation does NOT have
+# these flags and will fail with glm warnings treated as errors.
 
 name: Build gsplat Wheels
 
@@ -83,138 +83,138 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          python -m pip install ninja cmake
+          python -m pip install ninja cmake rich packaging
 
-      - name: Install gsplat from source (triggers CUDA compilation)
+      - name: Clone and build gsplat from git source
         env:
-          # Note: Removed 7.0 (too old) and 9.0 (Hopper - compilation issues)
+          # CUDA architectures to compile for:
           # 7.5 = Turing (RTX 20xx), 8.0 = Ampere (A100), 8.6 = Ampere (RTX 30xx), 8.9 = Ada (RTX 40xx)
           TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9"
           CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
           MAX_JOBS: "4"
         run: |
-          echo "Installing gsplat from source with CUDA compilation..."
-          python -m pip install gsplat==${{ github.event.inputs.gsplat_version }} -v --no-build-isolation
-          echo "Installation complete!"
-
-      - name: Trigger CUDA kernel compilation
-        env:
-          # Note: Removed 9.0 (Hopper) due to compilation issues with glm library
-          # 8.9 covers RTX 40xx series (Ada Lovelace)
-          TORCH_CUDA_ARCH_LIST: "7.5;8.0;8.6;8.9"
-          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
-        run: |
-          echo "Triggering gsplat CUDA kernel compilation..."
-          python -c "
-          import torch
+          Write-Host "=== Cloning gsplat v${{ github.event.inputs.gsplat_version }} from GitHub ==="
+          git clone --depth 1 --branch v${{ github.event.inputs.gsplat_version }} https://github.com/nerfstudio-project/gsplat.git gsplat_src
           
-          # Force gsplat to compile its CUDA kernels by importing and using them
-          print('Importing gsplat...')
+          Write-Host ""
+          Write-Host "=== Building gsplat with CUDA extensions ==="
+          Write-Host "CUDA_HOME: $env:CUDA_HOME"
+          Write-Host "TORCH_CUDA_ARCH_LIST: $env:TORCH_CUDA_ARCH_LIST"
+          Write-Host "MAX_JOBS: $env:MAX_JOBS"
+          
+          cd gsplat_src
+          
+          # The setup.py in git source has -diag-suppress=20012,186 for nvcc
+          # This is CRITICAL - the PyPI sdist + JIT path does NOT have this!
+          pip install -v .
+          
+          Write-Host ""
+          Write-Host "=== Build complete ==="
+
+      - name: Verify gsplat has compiled CUDA extension
+        run: |
+          Write-Host "=== Verifying gsplat installation ==="
+          
+          python -c @"
+          import sys
+          
+          # Check gsplat is installed
           import gsplat
           print(f'gsplat version: {gsplat.__version__}')
+          print(f'gsplat path: {gsplat.__path__[0]}')
           
-          # Import the cuda backend which triggers JIT compilation
-          print('Triggering CUDA kernel compilation (this may take a few minutes)...')
-          from gsplat.cuda._backend import _C
-          print('CUDA kernels compiled successfully!')
-          print(f'_C module: {_C}')
-          "
-
-      - name: Verify compiled extensions exist
-        shell: pwsh
-        run: |
-          echo "Checking for compiled extensions..."
-          $torch_ext = "$env:LOCALAPPDATA\torch_extensions"
-          if (Test-Path $torch_ext) {
-            echo "torch_extensions cache found at: $torch_ext"
-            Get-ChildItem -Path $torch_ext -Recurse -Filter "*.pyd" | ForEach-Object { 
-              echo "Found compiled extension: $($_.FullName)"
-            }
-          } else {
-            echo "ERROR: No torch_extensions cache found!"
-            exit 1
+          # The CRITICAL check - when built from setup.py, gsplat.csrc should exist
+          # This is the pre-compiled CUDA extension
+          try:
+              from gsplat import csrc
+              print(f'SUCCESS: gsplat.csrc module found!')
+              print(f'csrc module: {csrc}')
+              print(f'csrc file: {csrc.__file__}')
+          except ImportError as e:
+              print(f'FAILED: gsplat.csrc not found: {e}')
+              print('This means the CUDA extension was NOT compiled during pip install')
+              sys.exit(1)
+          "@
+          
+          Write-Host ""
+          Write-Host "=== Listing .pyd files in gsplat package ==="
+          $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
+          Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd" | ForEach-Object {
+            Write-Host "  $($_.FullName)"
           }
 
-      - name: Create wheel with compiled extensions
+      - name: Create wheel with compiled extension
         shell: pwsh
         run: |
-          # Get paths
           $site_packages = python -c "import site; print(site.getsitepackages()[0])"
           $gsplat_path = python -c "import gsplat; print(gsplat.__path__[0])"
-          $torch_ext = "$env:LOCALAPPDATA\torch_extensions"
           
           Write-Host "Site packages: $site_packages"
           Write-Host "gsplat path: $gsplat_path"
-          Write-Host "torch_extensions: $torch_ext"
           
-          # Find the compiled .pyd file
-          $pyd_files = Get-ChildItem -Path $torch_ext -Recurse -Filter "*.pyd"
+          # Verify .pyd exists in gsplat package
+          $pyd_files = Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd"
           if (-not $pyd_files) {
-            Write-Error "No compiled .pyd files found in torch_extensions!"
+            Write-Error "FATAL: No .pyd files found in gsplat package!"
+            Write-Error "The CUDA extension was not compiled. Build failed."
             exit 1
           }
           
+          Write-Host ""
           Write-Host "Found compiled extensions:"
           $pyd_files | ForEach-Object { Write-Host "  $($_.FullName)" }
           
-          # Copy compiled extension into gsplat package as csrc.pyd
-          $csrc_pyd = $pyd_files | Select-Object -First 1
-          $dest = Join-Path $gsplat_path "csrc.pyd"
-          Copy-Item $csrc_pyd.FullName -Destination $dest -Force
-          Write-Host "Copied $($csrc_pyd.FullName) -> $dest"
-          
-          # Also need to copy to gsplat/cuda/ for the import to work
-          $cuda_dest = Join-Path $gsplat_path "cuda\csrc.pyd"
-          Copy-Item $csrc_pyd.FullName -Destination $cuda_dest -Force
-          Write-Host "Copied $($csrc_pyd.FullName) -> $cuda_dest"
-          
-          # Verify the files are in place
-          Write-Host ""
-          Write-Host "gsplat package contents after copying:"
-          Get-ChildItem -Path $gsplat_path -Recurse -Filter "*.pyd" | ForEach-Object { Write-Host "  $($_.FullName)" }
-          
           # Create wheel directory
-          New-Item -ItemType Directory -Force -Path dist
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           
-          # Create wheel from the modified gsplat package
-          # First, we need to create a proper wheel structure
+          # Create wheel build structure
           $wheel_temp = "wheel_build"
-          New-Item -ItemType Directory -Force -Path $wheel_temp
+          if (Test-Path $wheel_temp) { Remove-Item -Recurse -Force $wheel_temp }
+          New-Item -ItemType Directory -Force -Path $wheel_temp | Out-Null
           
-          # Copy gsplat package
+          # Copy gsplat package (includes the .pyd file)
+          Write-Host ""
+          Write-Host "Copying gsplat package to wheel build..."
           Copy-Item -Path $gsplat_path -Destination "$wheel_temp\gsplat" -Recurse
           
-          # Get package metadata
+          # Copy dist-info for proper wheel metadata
           $dist_info = Get-ChildItem -Path $site_packages -Filter "gsplat-*.dist-info" | Select-Object -First 1
           if ($dist_info) {
             Copy-Item -Path $dist_info.FullName -Destination "$wheel_temp\$($dist_info.Name)" -Recurse
             Write-Host "Copied dist-info: $($dist_info.Name)"
+          } else {
+            Write-Error "WARNING: No dist-info found for gsplat"
           }
           
-          # Create the wheel using zipfile
+          # Create the wheel
           $version = "${{ github.event.inputs.gsplat_version }}"
-          $py_ver = "${{ matrix.python-version }}"
+          $py_ver = "${{ matrix.python-version }}" -replace '\.', ''
           $cuda_ver = "${{ github.event.inputs.cuda_version }}"
-          $wheel_name = "gsplat-${version}-py${py_ver}-${cuda_ver}.whl"
+          # Use proper wheel naming: gsplat-1.5.3+cu124-cp311-cp311-win_amd64.whl
+          $wheel_name = "gsplat-${version}+${cuda_ver}-cp${py_ver}-cp${py_ver}-win_amd64.whl"
+          
+          Write-Host ""
+          Write-Host "Creating wheel: $wheel_name"
           
           python -c @"
           import zipfile
           import os
           
-          wheel_path = 'dist/$wheel_name'
+          wheel_path = f'dist/$wheel_name'
           with zipfile.ZipFile(wheel_path, 'w', zipfile.ZIP_DEFLATED) as zf:
               for root, dirs, files in os.walk('wheel_build'):
                   for file in files:
                       file_path = os.path.join(root, file)
                       arc_name = os.path.relpath(file_path, 'wheel_build')
                       zf.write(file_path, arc_name)
-                      print(f'Added: {arc_name}')
-          print(f'Created wheel: {wheel_path}')
+              print(f'Created wheel with {len(zf.namelist())} files')
           "@
           
           Write-Host ""
           Write-Host "Created wheel:"
-          Get-ChildItem -Path dist -Filter "*.whl"
+          Get-ChildItem -Path dist -Filter "*.whl" | ForEach-Object {
+            Write-Host "  $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+          }
 
       - name: Verify wheel contains compiled extension
         shell: pwsh
@@ -223,14 +223,28 @@ jobs:
           Write-Host "Inspecting wheel: $($wheel.Name)"
           Write-Host ""
           
-          # List all .pyd files in the wheel
-          $pyd_in_wheel = python -m zipfile -l $wheel.FullName | Select-String "\.pyd"
-          if ($pyd_in_wheel) {
-            Write-Host "Compiled extensions in wheel:"
-            $pyd_in_wheel | ForEach-Object { Write-Host "  $_" }
+          # List .pyd files in wheel
+          $contents = python -m zipfile -l $wheel.FullName
+          $pyd_files = $contents | Select-String "\.pyd"
+          
+          if ($pyd_files) {
+            Write-Host "SUCCESS: Compiled extensions found in wheel:"
+            $pyd_files | ForEach-Object { Write-Host "  $_" }
           } else {
-            Write-Error "ERROR: No .pyd files found in wheel!"
+            Write-Error "FATAL: No .pyd files found in wheel!"
+            Write-Host ""
+            Write-Host "Wheel contents:"
+            $contents | Select-String "gsplat" | ForEach-Object { Write-Host "  $_" }
             exit 1
+          }
+          
+          # Also verify csrc.pyd specifically
+          $csrc = $contents | Select-String "csrc\.pyd"
+          if ($csrc) {
+            Write-Host ""
+            Write-Host "Verified: csrc.pyd is present in wheel"
+          } else {
+            Write-Error "WARNING: csrc.pyd not found by name, but other .pyd files exist"
           }
 
       - name: Upload wheel artifact
@@ -262,7 +276,7 @@ jobs:
           echo "Inspecting wheel contents:"
           for whl in wheels/*.whl; do
             echo "=== $whl ==="
-            python3 -m zipfile -l "$whl" | grep -E "\.pyd|\.so|csrc" || echo "  (no compiled extensions found)"
+            python3 -m zipfile -l "$whl" | grep -E "\.pyd|csrc" || echo "  (no compiled extensions found)"
           done
 
       - name: Create Release
@@ -277,12 +291,12 @@ jobs:
             - PyTorch ${{ github.event.inputs.torch_version }}
             - CUDA ${{ github.event.inputs.cuda_version }}
             - Python 3.11 and 3.12
-            - CUDA architectures: 7.0, 7.5, 8.0, 8.6, 8.9, 9.0 (RTX 20xx through 40xx)
+            - CUDA architectures: 7.5, 8.0, 8.6, 8.9 (RTX 20xx through 40xx)
             
             **Why these wheels exist:**
             - Windows has NO pre-built gsplat wheels on PyPI
             - Building from source requires MSVC (Visual Studio Build Tools)
-            - These wheels include pre-compiled CUDA kernels
+            - These wheels include pre-compiled CUDA kernels (`csrc.pyd`)
             
             **Installation:**
             FreeFlow GS Engine will automatically download the correct wheel.
