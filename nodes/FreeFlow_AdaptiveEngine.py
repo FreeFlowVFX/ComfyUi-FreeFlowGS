@@ -576,18 +576,18 @@ class FreeFlow_AdaptiveEngine:
             # Scale loss weight (prevents overly large splats)
             cmd.extend(["--scale-loss-weight", str(scale_loss_weight)])
             
-            # --- DENSIFICATION (Dynamic mode or Frame 0) ---
+            # --- DENSIFICATION (Dynamic mode ONLY) ---
+            # Frame 0 in Fixed mode uses Brush defaults (0.00004, 0.1) for maximum growth
+            # Do NOT pass densification params for Frame 0 in Fixed mode!
             is_first_frame = (idx == 0)
             
-            if not is_fixed_topology or is_first_frame:
-                # Densification interval (refine-every in Brush)
+            if not is_fixed_topology:
+                # Dynamic mode: use user-specified densification parameters
                 cmd.extend(["--refine-every", str(densification_interval)])
-                
-                # Gradient threshold for growth
                 cmd.extend(["--growth-grad-threshold", str(densify_grad_threshold)])
-                
-                # Fraction of points selected for growth
                 cmd.extend(["--growth-select-fraction", str(growth_select_fraction)])
+            # Note: Fixed mode Frame 0 intentionally uses NO densification flags
+            # This lets Brush use its defaults and grow to 600k+ splats
             
             # --- VISUALIZATION LOGIC ---
             if visualize_training == "Spawn Native GUI":
