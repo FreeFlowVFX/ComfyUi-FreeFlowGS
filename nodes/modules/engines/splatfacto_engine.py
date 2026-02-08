@@ -42,6 +42,7 @@ class SplatfactoEngine(IGSEngine):
         self._env = None
         self._init_error = None
         self.last_checkpoint_dir = None  # Stores checkpoint dir from last successful training
+        self._browser_opened = False  # Track if browser was already opened (only open once per run)
         
         try:
             from ..nerfstudio_env import NerfstudioEnvironment
@@ -177,25 +178,45 @@ class SplatfactoEngine(IGSEngine):
         visualize_mode = params.get('visualize_training', 'Off')
         preview_interval = params.get('preview_interval', 500)
         
+        iterations = params.get('iterations', 30000)
+        
         cmd = [
             str(ns_train),
             variant,
             "--data", str(dataset_path),
             "--output-dir", str(nerfstudio_output_dir),
-            "--max-num-iterations", str(params.get('iterations', 30000)),
+            "--max-num-iterations", str(iterations),
             "--machine.device-type", device_type,
             
             # Model parameters
             f"--pipeline.model.sh_degree={params.get('sh_degree', 3)}",
-            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.005)}",
-            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0002)}",
+            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.1)}",
+            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0008)}",
             f"--pipeline.model.use_scale_regularization={bool_str(params.get('use_scale_regularization', True))}",
+            
+            # Disable eval-all-images to prevent massive slowdown near end of training
+            # Default nerfstudio runs it at step 25000 which stalls for minutes
+            "--steps-per-eval-all-images", "0",
         ]
         
+        # --- MASK SUPPORT ---
+        # If masks/ folder exists in dataset, tell nerfstudio to use them
+        masks_dir = dataset_path / "masks"
+        if masks_dir.exists() and any(masks_dir.iterdir()):
+            cmd.extend(["colmap", "--colmap-path", "sparse/0", "--masks-path", "masks"])
+            print(f"[SplatfactoEngine] Masks detected: {masks_dir}")
+            self._masks_added_to_dataparser = True
+        else:
+            self._masks_added_to_dataparser = False
+        
         # --- FIXED TOPOLOGY MODE ---
-        # Disable culling after densification phase to preserve splat count
+        # For stable 4D: disable culling, stop splitting, and stop refinement after frame 0
         if not params.get('continue_cull_post_densification', True):
             cmd.append("--pipeline.model.continue_cull_post_densification=False")
+            # Also lock densification for truly fixed topology
+            cmd.append(f"--pipeline.model.stop_split_at=0")
+            cmd.append(f"--pipeline.model.refine_every=999999")
+            print(f"[SplatfactoEngine] Fixed topology: culling, splitting, and refinement disabled")
         
         # --- WARM START ---
         # Load from previous nerfstudio checkpoint directory if available
@@ -210,14 +231,19 @@ class SplatfactoEngine(IGSEngine):
             # is handled by the orchestrator before calling train()
             print(f"[SplatfactoEngine] Using points3D.txt seeding for initialization")
         
-        # --- VIEWER / VISUALIZATION SETTINGS ---
-        if visualize_mode == "Spawn Native GUI":
-            # Enable Viser web viewer and auto-open browser
-            cmd.extend(["--vis", "viewer"])
-            viewer_port = params.get('viewer_port', 7007)
-            cmd.append(f"--viewer.websocket-port={viewer_port}")
-            print(f"[SplatfactoEngine] Viser viewer enabled at http://localhost:{viewer_port}")
-            # Auto-open browser after a short delay (give viser time to start)
+        # --- VIEWER / VISUALIZATION ---
+        # Splatfacto always uses the Viser web viewer (nerfstudio's only real-time preview)
+        # The viewer is lightweight and doesn't slow down training
+        viewer_port = params.get('viewer_port', 7007)
+        cmd.extend(["--vis", "viewer"])
+        cmd.append(f"--viewer.websocket-port={viewer_port}")
+        # Process must exit cleanly after training (not hang waiting for ctrl+c)
+        cmd.append("--viewer.quit-on-train-completion=True")
+        print(f"[SplatfactoEngine] Viser viewer at http://localhost:{viewer_port}")
+        
+        # Auto-open browser ONCE on first frame only
+        if not self._browser_opened:
+            self._browser_opened = True
             def open_viewer_browser(port):
                 time.sleep(5)  # Wait for viser server to start
                 import webbrowser
@@ -225,16 +251,6 @@ class SplatfactoEngine(IGSEngine):
                 print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
             browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
             browser_thread.start()
-        elif visualize_mode == "Save Preview Images":
-            # Use tensorboard for logging + enable eval image saving
-            cmd.extend(["--vis", "tensorboard"])
-            # Set eval interval to save preview images periodically
-            cmd.extend(["--steps-per-eval-image", str(preview_interval)])
-            print(f"[SplatfactoEngine] Preview images will be saved every {preview_interval} steps")
-        else:
-            # Off - no interactive viewer, minimal logging
-            # tensorboard mode doesn't spawn a server, just logs to disk
-            cmd.extend(["--vis", "tensorboard"])
         
         # --- LOGGING ---
         # Set experiment name for organized outputs
@@ -245,14 +261,13 @@ class SplatfactoEngine(IGSEngine):
         # Add colmap dataparser for COLMAP-format datasets
         # This must come AFTER all model options
         # Dataparser-specific options come AFTER the dataparser subcommand
-        cmd.append("colmap")
-        
-        # Override default colmap path (colmap/sparse/0) to match FreeFlow's output structure (sparse/0)
-        # This is critical: nerfstudio expects colmap/sparse/0/ but FreeFlow_COLMAP outputs sparse/0/
-        cmd.extend(["--colmap-path", "sparse/0"])
+        if not self._masks_added_to_dataparser:
+            # Masks block already added colmap + colmap-path + masks-path
+            cmd.append("colmap")
+            # Override default colmap path (colmap/sparse/0) to match FreeFlow's output structure
+            cmd.extend(["--colmap-path", "sparse/0"])
         
         # Disable automatic downscaling to prevent interactive prompts in headless mode
-        # User can pre-downscale images if needed for performance
         cmd.extend(["--downscale-factor", "1"])
         
         print(f"[SplatfactoEngine] Running: {' '.join(cmd)}")
@@ -263,6 +278,10 @@ class SplatfactoEngine(IGSEngine):
         # Fix Windows console encoding issues with Rich library
         # Without this, nerfstudio crashes on CONSOLE.rule() due to cp1252 encoding
         env["PYTHONIOENCODING"] = "utf-8"
+        # PyTorch 2.6 changed torch.load() default to weights_only=True
+        # Nerfstudio 1.1.5 uses torch.load() without specifying weights_only
+        # which causes checkpoint loading to fail. This env var restores old behavior.
+        env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         
         try:
             process = subprocess.Popen(
@@ -522,6 +541,8 @@ class SplatfactoEngine(IGSEngine):
         # Fix Windows console encoding issues with Rich library
         export_env = os.environ.copy()
         export_env["PYTHONIOENCODING"] = "utf-8"
+        # PyTorch 2.6 weights_only fix (same as ns-train)
+        export_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         
         try:
             result = subprocess.run(
