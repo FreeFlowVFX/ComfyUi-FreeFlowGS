@@ -17,7 +17,6 @@ app.registerExtension({
                 const filterWidget = findWidget("preview_camera_filter");
                 const evalCameraWidget = findWidget("eval_camera_index"); // Camera index selector
                 const topoWidget = findWidget("topology_mode");
-                const smoothWidget = findWidget("apply_smoothing");
 
                 const createAnchorWidget = findWidget("distributed_anchor");
                 const anchorPathWidget = findWidget("distributed_anchor_path");

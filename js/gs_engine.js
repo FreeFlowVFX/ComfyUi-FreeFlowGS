@@ -35,10 +35,12 @@ app.registerExtension({
                     "splat_count",
                     "learning_rate", 
                     "densification_interval",
-                    "opacity_reset_interval",
                     "densify_grad_threshold",
+                    "growth_select_fraction",
                     "feature_lr",
                     "gaussian_lr",
+                    "opacity_lr",
+                    "scale_loss_weight",
                     "masking_method",
                     "motion_sensitivity",
                     // Brush-only preview controls
@@ -64,8 +66,7 @@ app.registerExtension({
                 // --- Topology params (show when "Fixed") ---
                 const topoWidget = findWidget("topology_mode");
                 const fixedTopoParams = [
-                    "apply_smoothing",
-                    "realign_topology"
+                    "apply_smoothing"
                 ];
 
                 // --- Distributed params (show when enabled) ---

@@ -148,10 +148,6 @@ class FreeFlow_GS_Engine:
                     "default": False,
                     "tooltip": "Apply temporal smoothing filter. Requires Fixed topology mode."
                 }),
-                "realign_topology": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Re-align point IDs before smoothing. Fixes point shuffling."
-                }),
                 
                 # ═══════════════════════════════════════════════════════════════
                 # CORE TRAINING PARAMETERS [SHARED]

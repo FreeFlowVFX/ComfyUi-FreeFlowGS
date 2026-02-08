@@ -54,7 +54,6 @@ class FreeFlow_AdaptiveEngine:
                 # --- 3. Topology Control ---
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Stable)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
                 "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay temporal filter to smooth point positions across frames. Eliminates jitter. REQUIRES Fixed Topology mode."}),
-                "realign_topology": ("BOOLEAN", {"default": True, "tooltip": "Re-align point IDs using nearest-neighbor matching before smoothing. Fixes point order shuffling from Brush. Disable only for debugging."}),
                 
                 # --- 4. Core Model Parameters ---
                 "splat_count": ("INT", {"default": 800000, "min": 1000, "max": 10000000, "tooltip": "Maximum number of Gaussian splats. Higher = more detail but slower rendering. 800k optimized for high-end film production."}),
@@ -67,22 +66,22 @@ class FreeFlow_AdaptiveEngine:
                 "densify_grad_threshold": ("FLOAT", {"default": 0.00015, "min": 0.000001, "max": 0.01, "step": 0.000001, "tooltip": "Gradient threshold to trigger point splitting. 0.00015 optimized for film: sufficient detail growth while maintaining temporal stability."}),
                 "growth_select_fraction": ("FLOAT", {"default": 0.12, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Fraction of high-gradient points selected for densification. 0.12 optimized for film: controlled growth for stable 4D sequences without flicker."}),
                 
+                # --- Learning Rates ---
+                "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
+                "gaussian_lr": ("FLOAT", {"default": 0.0003, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. 0.0003 optimized for film: faster convergence than ultra-low values while maintaining 4D stability."}),
+                "opacity_lr": ("FLOAT", {"default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001, "tooltip": "Learning rate for opacity values. Controls how fast transparency updates. Lower = more stable opacity."}),
+                "scale_loss_weight": ("FLOAT", {"default": 1e-8, "min": 0.0, "max": 1e-5, "step": 1e-9, "tooltip": "Regularization weight for scale loss. Higher values constrain splat sizes. Helps prevent overly large splats."}),
+                
                 # --- 6. Initialization & Selection ---
                 "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
                 "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize first frame from COLMAP sparse point cloud. Essential for correct 3D scale and camera alignment. Only disable for testing."}),
                 "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "Optical Flow (Robust)", "tooltip": "How to detect motion between frames. Optical Flow: accurate but slower. Simple Diff: fast but may flicker on subtle motion."}),
                 "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "How aggressively to mask static areas. 0=no masking. 1=mask everything static. 0.3 is safe default to prevent background 'swimming'."}),
                 
-                # --- 7. Efficiency & Advanced ---
-                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Use filesystem links instead of copying images. Saves gigabytes of disk space. Disable if you have permission issues on Windows."}),
-                "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
-                "gaussian_lr": ("FLOAT", {"default": 0.0003, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. 0.0003 optimized for film: faster convergence than ultra-low values while maintaining 4D stability."}),
-                "opacity_lr": ("FLOAT", {"default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001, "tooltip": "Learning rate for opacity values. Controls how fast transparency updates. Lower = more stable opacity."}),
-                "scale_loss_weight": ("FLOAT", {"default": 1e-8, "min": 0.0, "max": 1e-5, "step": 1e-9, "tooltip": "Regularization weight for scale loss. Higher values constrain splat sizes. Helps prevent overly large splats."}),
-                
-                # --- 8. Output ---
+                # --- 7. Output & Storage ---
                 "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Custom folder for PLY output. Leave empty to use ComfyUI output folder. Use absolute path like D:/Project/Splats."}),
                 "filename_prefix": ("STRING", {"default": "FreeFlow_Splat", "multiline": False, "tooltip": "Prefix for output PLY filenames. Result: {prefix}_frame_0001.ply, {prefix}_frame_0002.ply, etc."}),
+                "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Use filesystem links instead of copying images. Saves gigabytes of disk space. Disable if you have permission issues on Windows."}),
                 "cleanup_work_dirs": ("BOOLEAN", {"default": True, "label": "Auto-Delete Work Folders", "tooltip": "Delete temporary work folders after each frame. Saves disk space. Disable to keep intermediate files for debugging."}),
                 
                 # --- 9. Distributed Training ---
@@ -94,8 +93,8 @@ class FreeFlow_AdaptiveEngine:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("ply_sequence_output",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("raw_output", "realigned_output", "smoothed_output")
     FUNCTION = "adapt_flow"
     CATEGORY = "FreeFlow"
     OUTPUT_NODE = True
@@ -369,13 +368,13 @@ class FreeFlow_AdaptiveEngine:
         return active_cams
 
     def adapt_flow(self, multicam_feed, colmap_anchor, splat_count, sh_degree,
-                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False, realign_topology=True,
+                   topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False,
                    visualize_training="Off", preview_interval=500, eval_camera_index=10,
                    iterations=10000, learning_rate=0.0005, densification_interval=300,
-                   densify_grad_threshold=0.0002, growth_select_fraction=0.1, use_symlinks=True,
-                   frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3, 
-                   feature_lr=0.0025, gaussian_lr=0.00016, opacity_lr=0.01, scale_loss_weight=1e-8,
-                   custom_output_path="", filename_prefix="FreeFlow", cleanup_work_dirs=True, 
+                   densify_grad_threshold=0.0002, growth_select_fraction=0.1,
+                   feature_lr=0.0025, gaussian_lr=0.0003, opacity_lr=0.01, scale_loss_weight=1e-8,
+                   frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3,
+                   custom_output_path="", filename_prefix="FreeFlow", use_symlinks=True, cleanup_work_dirs=True,
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
                    unique_id=None, preview_camera_filter=""):
         """
@@ -763,44 +762,79 @@ class FreeFlow_AdaptiveEngine:
             if cleanup_work_dirs:
                 shutil.rmtree(frame_work_dir, ignore_errors=True)
                 
-        # --- POST-PROCESS: TEMPORAL SMOOTHING (Stable) ---
-        if apply_smoothing:
-            if is_fixed_topology and len(indices_to_process) > 3:
-                FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
-                try:
-                    self._apply_temporal_smoothing(output_dir, filename_prefix, indices_to_process, multicam_feed, cameras, realign_topology)
-                    FreeFlowUtils.log("✅ Smoothing Complete!")
-                except Exception as e:
-                    FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
-            else:
-                if not is_fixed_topology:
-                     FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology used.", "WARN")
-                else:
-                     FreeFlowUtils.log("⚠️ Smoothing skipped: Sequence too short (<4 frames).", "WARN")
+        # --- POST-PROCESS: REALIGNMENT & SMOOTHING (Fixed Topology Only) ---
+        realigned_dir = None
+        smoothed_dir = None
+        
+        if is_fixed_topology and len(indices_to_process) > 3:
+            FreeFlowUtils.log("🔗 Running Point Realignment...")
+            try:
+                realigned_dir = self._apply_temporal_smoothing(
+                    output_dir, filename_prefix, indices_to_process, 
+                    multicam_feed, cameras, do_smoothing=False
+                )
+                FreeFlowUtils.log(f"✅ Realignment Complete! Saved to: {realigned_dir}")
+                
+                if apply_smoothing:
+                    FreeFlowUtils.log("🌊 Running Temporal Smoothing...")
+                    smoothed_dir = self._apply_temporal_smoothing(
+                        output_dir, filename_prefix, indices_to_process,
+                        multicam_feed, cameras, do_smoothing=True
+                    )
+                    FreeFlowUtils.log(f"✅ Smoothing Complete! Saved to: {smoothed_dir}")
+                    
+            except Exception as e:
+                FreeFlowUtils.log(f"Post-processing failed: {e}", "WARN")
+        elif is_fixed_topology and len(indices_to_process) <= 3:
+            FreeFlowUtils.log("⚠️ Post-processing skipped: Sequence too short (<4 frames).", "WARN")
+        elif apply_smoothing and not is_fixed_topology:
+            FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology.", "WARN")
                 
 
 
         FreeFlowUtils.log("=" * 50)
-        FreeFlowUtils.log(f"✅ Training Complete! Output: {output_dir}")
+        FreeFlowUtils.log(f"✅ Training Complete!")
+        FreeFlowUtils.log(f"   📁 Raw output: {output_dir}")
+        if realigned_dir:
+            FreeFlowUtils.log(f"   📁 Realigned: {realigned_dir}")
+        if smoothed_dir:
+            FreeFlowUtils.log(f"   📁 Smoothed: {smoothed_dir}")
         FreeFlowUtils.log("=" * 50)
 
-        return (str(output_dir),)
+        # Return both paths (realigned and smoothed)
+        return (str(output_dir), str(realigned_dir) if realigned_dir else "", str(smoothed_dir) if smoothed_dir else "")
 
-    def _apply_temporal_smoothing(self, output_dir, prefix, indices, multicam_feed, cameras, realign_topology=True):
+    def _apply_temporal_smoothing(self, output_dir, prefix, indices, multicam_feed, cameras, do_smoothing=True):
         """
-        Applies Savitzky-Golay filtering to the positions of the sequence.
+        Applies topology realignment and optionally Savitzky-Golay filtering.
         ONLY works for Fixed Topology mode where point count is constant.
-        SAVES to a 'smoothed' subfolder to preserve original trained files.
         
-        If realign_topology is True, performs KD-Tree based point ID realignment
-        before smoothing to fix point order shuffling from Brush.
+        SAVES to separate subfolders to preserve original trained files:
+        - realigned/ : Topology realigned only (no smoothing)
+        - smoothed/  : Realigned + Savitzky-Golay filtered
+        
+        Always performs KD-Tree based point ID realignment first to fix
+        point order shuffling from Brush. Realignment is essential for both
+        realigned and smoothed outputs.
+        
+        Args:
+            do_smoothing: If True, apply Savitzky-Golay filter after realignment
+            
+        Returns:
+            Path to output folder (realigned/ or smoothed/)
         """
-        if not indices: return
+        if not indices: return None
         
-        # Create smoothed output folder (preserve originals!)
-        smoothed_dir = output_dir / "smoothed"
-        smoothed_dir.mkdir(exist_ok=True)
-        FreeFlowUtils.log(f"   📁 Smoothed output will be saved to: {smoothed_dir}")
+        # Determine output folder based on mode
+        if do_smoothing:
+            out_dir = output_dir / "smoothed"
+            mode_name = "smoothed"
+        else:
+            out_dir = output_dir / "realigned"
+            mode_name = "realigned"
+        
+        out_dir.mkdir(exist_ok=True)
+        FreeFlowUtils.log(f"   📁 {mode_name.capitalize()} output will be saved to: {out_dir}")
         
         # Extract REAL frame IDs from source image filenames
         first_cam = cameras[0]
@@ -814,8 +848,8 @@ class FreeFlow_AdaptiveEngine:
         
         # Source PLY files (originals - read only) - use REAL frame IDs
         source_files = [output_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
-        # Destination PLY files (smoothed folder) - use REAL frame IDs
-        output_files = [smoothed_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
+        # Destination PLY files (output folder) - use REAL frame IDs
+        output_files = [out_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
         
         # Check first file to get vertex count and header size
         first_ply = source_files[0]
@@ -935,30 +969,33 @@ class FreeFlow_AdaptiveEngine:
             
             points[t] = xyz_floats
         
-        # 3.5. TOPOLOGY REALIGNMENT (KD-Tree based)
+        # 3.5. TOPOLOGY REALIGNMENT (KD-Tree based) - ALWAYS PERFORM
         # Fixes point ID shuffling from Brush by matching points incrementally
-        if realign_topology:
-            FreeFlowUtils.log("   🔧 Realigning topology using KD-Tree matching...")
-            reorder_maps = self._compute_topology_realignment(points)
-            
-            # Apply reorder to both points array and raw data
-            for t in range(T):
-                indices_map = reorder_maps[t]
-                
-                # Reorder points array
-                points[t] = points[t][indices_map]
-                
-                # Reorder the full PLY binary data (all properties, not just XYZ)
-                all_data[t] = self._reorder_ply_binary(all_data[t], indices_map, header_len, stride, vertex_count)
-            
-            FreeFlowUtils.log(f"   ✅ Realigned {T} frames")
-            
-        # 4. Apply Savitzky-Golay
-        # Smooth across Time (axis 0)
-        window_length = min(7, T if T % 2 == 1 else T-1)
-        if window_length < 3: window_length = 3
+        FreeFlowUtils.log("   🔧 Realigning topology using KD-Tree matching...")
+        reorder_maps = self._compute_topology_realignment(points)
         
-        smoothed = scipy.signal.savgol_filter(points, window_length=window_length, polyorder=2, axis=0)
+        # Apply reorder to both points array and raw data
+        for t in range(T):
+            indices_map = reorder_maps[t]
+            
+            # Reorder points array
+            points[t] = points[t][indices_map]
+            
+            # Reorder the full PLY binary data (all properties, not just XYZ)
+            all_data[t] = self._reorder_ply_binary(all_data[t], indices_map, header_len, stride, vertex_count)
+        
+        FreeFlowUtils.log(f"   ✅ Realigned {T} frames")
+        
+        # 4. Apply Savitzky-Golay (only if do_smoothing is True)
+        if do_smoothing:
+            # Smooth across Time (axis 0)
+            window_length = min(7, T if T % 2 == 1 else T-1)
+            if window_length < 3: 
+                window_length = 3
+            
+            points_to_write = scipy.signal.savgol_filter(points, window_length=window_length, polyorder=2, axis=0)
+        else:
+            points_to_write = points
         
         # 5. Write back
         for t, data in enumerate(valid_data):
@@ -966,32 +1003,23 @@ class FreeFlow_AdaptiveEngine:
             reshaped = raw_view.reshape(vertex_count, stride)
             
             # Get target slice
-            target_bytes = reshaped[:, :12] # Reference to buffer?
+            target_bytes = reshaped[:, :12]
             
-            # Convert smoothed to bytes
-            # .tobytes() returns copy. We need to assign.
-            # view replacement
-            
-            new_xyz = smoothed[t].astype(np.float32)
-            # copy into the buffer view
-            # We need to flatten and view as uint8
-            new_bytes = new_xyz.tobytes() # flat bytes
-            # Assign to the reshaped slice?
-            # numpy can assign if shapes match
-            # target_bytes is (N, 12). new_bytes is flat len N*12
+            # Use positions (smoothed or realigned)
+            new_xyz = points_to_write[t].astype(np.float32)
             
             # Cast new_xyz to uint8 view of shape (N, 12)
             new_uint8 = new_xyz.view(np.uint8).reshape(vertex_count, 12)
             
             np.copyto(target_bytes, new_uint8)
             
-            # Save file to SMOOTHED folder (preserve originals!)
+            # Save file to output folder (preserve originals!)
             output_path = output_files[t]
             if output_path:
                 with open(output_path, "wb") as f:
                     f.write(data)
                     
-        return True
+        return out_dir
 
     def _compute_topology_realignment(self, all_positions):
         """
