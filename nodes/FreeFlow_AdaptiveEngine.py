@@ -57,15 +57,15 @@ class FreeFlow_AdaptiveEngine:
                 "realign_topology": ("BOOLEAN", {"default": True, "tooltip": "Re-align point IDs using nearest-neighbor matching before smoothing. Fixes point order shuffling from Brush. Disable only for debugging."}),
                 
                 # --- 4. Core Model Parameters ---
-                "splat_count": ("INT", {"default": 500000, "min": 1000, "max": 10000000, "tooltip": "Maximum number of Gaussian splats. Higher = more detail but slower rendering. 500k is good for film, 100k for previews."}),
+                "splat_count": ("INT", {"default": 800000, "min": 1000, "max": 10000000, "tooltip": "Maximum number of Gaussian splats. Higher = more detail but slower rendering. 800k optimized for high-end film production."}),
                 "sh_degree": ("INT", {"default": 3, "min": 0, "max": 3, "tooltip": "Spherical Harmonics degree controls view-dependent effects. 3=full specular/reflections (best quality). 0=flat diffuse colors (faster, more stable)."}),
                 "iterations": ("INT", {"default": 30000, "min": 1000, "max": 100000, "tooltip": "Training steps per frame. More steps = higher quality and less flicker. 30k is good for production, 5k-10k for testing."}),
                 
                 # --- 5. Advanced Optimization ---
                 "learning_rate": ("FLOAT", {"default": 0.00002, "min": 0.000001, "max": 0.001, "step": 0.000001, "tooltip": "Controls how fast point POSITIONS update. Lower = smoother, more stable results. Higher = faster convergence but may overshoot."}),
                 "densification_interval": ("INT", {"default": 200, "min": 10, "max": 1000, "tooltip": "How often to add/remove points (refinement). Lower = more aggressive point growth. Higher = more conservative, stable topology."}),
-                "densify_grad_threshold": ("FLOAT", {"default": 0.00004, "min": 0.000001, "max": 0.01, "step": 0.000001, "tooltip": "Gradient threshold to trigger point splitting. Lower = add more points (finer detail). Higher = fewer points (faster, coarser)."}),
-                "growth_select_fraction": ("FLOAT", {"default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Fraction of high-gradient points selected for densification. Lower = more selective growth. Higher = more aggressive point addition."}),
+                "densify_grad_threshold": ("FLOAT", {"default": 0.00015, "min": 0.000001, "max": 0.01, "step": 0.000001, "tooltip": "Gradient threshold to trigger point splitting. 0.00015 optimized for film: sufficient detail growth while maintaining temporal stability."}),
+                "growth_select_fraction": ("FLOAT", {"default": 0.12, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Fraction of high-gradient points selected for densification. 0.12 optimized for film: controlled growth for stable 4D sequences without flicker."}),
                 
                 # --- 6. Initialization & Selection ---
                 "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
@@ -76,7 +76,7 @@ class FreeFlow_AdaptiveEngine:
                 # --- 7. Efficiency & Advanced ---
                 "use_symlinks": ("BOOLEAN", {"default": True, "label": "Use Symlinks (Save Disk)", "tooltip": "Use filesystem links instead of copying images. Saves gigabytes of disk space. Disable if you have permission issues on Windows."}),
                 "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
-                "gaussian_lr": ("FLOAT", {"default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. Set very low (0.00016) for stable geometry across frames."}),
+                "gaussian_lr": ("FLOAT", {"default": 0.0003, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. 0.0003 optimized for film: faster convergence than ultra-low values while maintaining 4D stability."}),
                 "opacity_lr": ("FLOAT", {"default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001, "tooltip": "Learning rate for opacity values. Controls how fast transparency updates. Lower = more stable opacity."}),
                 "scale_loss_weight": ("FLOAT", {"default": 1e-8, "min": 0.0, "max": 1e-5, "step": 1e-9, "tooltip": "Regularization weight for scale loss. Higher values constrain splat sizes. Helps prevent overly large splats."}),
                 
