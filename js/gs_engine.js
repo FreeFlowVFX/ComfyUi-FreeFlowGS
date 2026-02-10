@@ -53,7 +53,15 @@ app.registerExtension({
                     "splatfacto_variant",
                     "cull_alpha_thresh",
                     "splatfacto_densify_grad_thresh",
-                    "use_scale_regularization"
+                    "use_scale_regularization",
+                    "warmup_length",
+                    "refine_every",
+                    "num_downscales",
+                    "max_gs_num",
+                    "cull_screen_size",
+                    "split_screen_size",
+                    "sh_degree_interval",
+                    "background_color"
                 ];
 
                 // --- Visualization params (show when NOT "Off") ---
@@ -148,11 +156,36 @@ app.registerExtension({
                 // MAIN VISIBILITY UPDATE FUNCTION
                 // ═══════════════════════════════════════════════════════════════
                 
+                // Store original options for visualize_training
+                const originalVizOptions = vizWidget ? [...vizWidget.options] : ["Off", "Save Preview Images", "Spawn Native GUI"];
+                
                 const updateVisibility = () => {
                     const engine = engineWidget ? engineWidget.value : "Brush (Fast)";
                     const isBrush = engine && engine.includes("Brush");
                     const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
                     const isOpenSplat = engine && engine.includes("OpenSplat");
+
+                    // --- Update visualization options based on engine ---
+                    if (vizWidget) {
+                        let newOptions;
+                        if (isBrush) {
+                            newOptions = ["Off", "Save Preview Images", "Spawn Native GUI"];
+                        } else if (isSplatfacto) {
+                            newOptions = ["Off", "Spawn Native GUI"];
+                        } else {
+                            // OpenSplat - no visualization support yet
+                            newOptions = ["Off"];
+                        }
+                        
+                        // Only update if options changed
+                        if (JSON.stringify(vizWidget.options) !== JSON.stringify(newOptions)) {
+                            vizWidget.options = newOptions;
+                            // Reset to "Off" if current selection not in new options
+                            if (!newOptions.includes(vizWidget.value)) {
+                                vizWidget.value = "Off";
+                            }
+                        }
+                    }
 
                     const vizMode = vizWidget ? vizWidget.value : "Off";
                     const showPreviewParams = (vizMode !== "Off");

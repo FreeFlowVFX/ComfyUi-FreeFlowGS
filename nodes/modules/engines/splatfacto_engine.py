@@ -208,16 +208,26 @@ class SplatfactoEngine(IGSEngine):
             f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.1)}",
             f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0008)}",
             f"--pipeline.model.use_scale_regularization={bool_str(params.get('use_scale_regularization', True))}",
+            # New advanced parameters
+            f"--pipeline.model.max_gs_num={params.get('max_gs_num', 1000000)}",
+            f"--pipeline.model.refine_every={params.get('refine_every', 100)}",
+            f"--pipeline.model.warmup_length={params.get('warmup_length', 500)}",
+            f"--pipeline.model.num_downscales={params.get('num_downscales', 2)}",
+            f"--pipeline.model.cull_screen_size={params.get('cull_screen_size', 0.15)}",
+            f"--pipeline.model.split_screen_size={params.get('split_screen_size', 0.05)}",
+            f"--pipeline.model.sh_degree_interval={params.get('sh_degree_interval', 1000)}",
+            f"--pipeline.model.background_color={params.get('background_color', 'random')}",
         ])
         
         # --- FIXED TOPOLOGY MODE ---
+        # Note: continue_cull_post_densification flag removed - not available in nerfstudio 1.0-1.1.5
+        # stop_split_at=0 and refine_every=999999 are sufficient to lock topology
         if not params.get('continue_cull_post_densification', True):
             cmd.extend([
-                "--pipeline.model.continue_cull_post_densification=False",
                 "--pipeline.model.stop_split_at=0",
                 "--pipeline.model.refine_every=999999",
             ])
-            print(f"[SplatfactoEngine] Fixed topology: culling, splitting, and refinement disabled")
+            print(f"[SplatfactoEngine] Fixed topology: splitting stopped, refinement disabled")
         
         # --- WARM START (checkpoint loading) ---
         nerfstudio_checkpoint_dir = params.get('nerfstudio_checkpoint_dir')
@@ -229,24 +239,32 @@ class SplatfactoEngine(IGSEngine):
         
         # --- VISUALIZATION (only if not Off) ---
         visualize_mode = params.get('visualize_training', 'Off')
+        is_first_frame = params.get('frame_idx', 0) == 0
+        
         if visualize_mode != "Off":
             cmd.extend([
                 "--vis", "viewer",
                 f"--viewer.websocket-port={viewer_port}",
                 "--viewer.quit-on-train-completion=True",
             ])
-            print(f"[SplatfactoEngine] Viser viewer at http://localhost:{viewer_port}")
             
-            # Auto-open browser ONCE on first frame only
-            if not self._browser_opened:
-                self._browser_opened = True
-                def open_viewer_browser(port):
-                    time.sleep(5)
-                    import webbrowser
-                    webbrowser.open(f"http://localhost:{port}")
-                    print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
-                browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
-                browser_thread.start()
+            if is_first_frame:
+                # First frame: Start new viewer and open browser
+                print(f"[SplatfactoEngine] Starting Viser viewer at http://localhost:{viewer_port}")
+                
+                # Auto-open browser ONCE on first frame only
+                if not self._browser_opened:
+                    self._browser_opened = True
+                    def open_viewer_browser(port):
+                        time.sleep(5)
+                        import webbrowser
+                        webbrowser.open(f"http://localhost:{port}")
+                        print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
+                    browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
+                    browser_thread.start()
+            else:
+                # Subsequent frames: Connect to existing viewer
+                print(f"[SplatfactoEngine] Connecting to existing viewer at http://localhost:{viewer_port}")
         
         # --- LOGGING ---
         cmd.extend(["--experiment-name", experiment_name])

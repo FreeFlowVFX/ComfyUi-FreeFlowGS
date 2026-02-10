@@ -229,6 +229,40 @@ class FreeFlow_GS_Engine:
                     "tooltip": "[Splatfacto] Prevent splat explosion with scale regularization."
                 }),
                 
+                # --- Advanced Splatfacto Parameters ---
+                "max_gs_num": ("INT", {
+                    "default": 1000000, "min": 1000, "max": 10000000,
+                    "tooltip": "[Splatfacto] Maximum number of Gaussians (equivalent to Brush splat_count)."
+                }),
+                "refine_every": ("INT", {
+                    "default": 100, "min": 10, "max": 1000,
+                    "tooltip": "[Splatfacto] How often to densify/prune (lower = more frequent)."
+                }),
+                "warmup_length": ("INT", {
+                    "default": 500, "min": 0, "max": 5000,
+                    "tooltip": "[Splatfacto] Steps before refinement starts."
+                }),
+                "num_downscales": ("INT", {
+                    "default": 2, "min": 0, "max": 5,
+                    "tooltip": "[Splatfacto] Initial resolution 1/2^d (affects quality/speed)."
+                }),
+                "cull_screen_size": ("FLOAT", {
+                    "default": 0.15, "min": 0.01, "max": 1.0, "step": 0.01,
+                    "tooltip": "[Splatfacto] Screen % threshold for culling (advanced)."
+                }),
+                "split_screen_size": ("FLOAT", {
+                    "default": 0.05, "min": 0.01, "max": 1.0, "step": 0.01,
+                    "tooltip": "[Splatfacto] Screen % threshold for splitting (advanced)."
+                }),
+                "sh_degree_interval": ("INT", {
+                    "default": 1000, "min": 100, "max": 10000,
+                    "tooltip": "[Splatfacto] SH degree increase interval (advanced)."
+                }),
+                "background_color": (["random", "black", "white"], {
+                    "default": "random",
+                    "tooltip": "[Splatfacto] Background color during training (advanced)."
+                }),
+                
                 # ═══════════════════════════════════════════════════════════════
                 # FRAME SELECTION & INITIALIZATION [SHARED]
                 # ═══════════════════════════════════════════════════════════════
@@ -1367,6 +1401,17 @@ class FreeFlow_GS_Engine:
                     'cull_alpha_thresh': kwargs.get('cull_alpha_thresh', 0.005),
                     'densify_grad_thresh': kwargs.get('splatfacto_densify_grad_thresh', 0.0002),
                     'use_scale_regularization': kwargs.get('use_scale_regularization', True),
+                    # New advanced Splatfacto parameters
+                    'max_gs_num': kwargs.get('max_gs_num', 1000000),
+                    'refine_every': kwargs.get('refine_every', 100),
+                    'warmup_length': kwargs.get('warmup_length', 500),
+                    'num_downscales': kwargs.get('num_downscales', 2),
+                    'cull_screen_size': kwargs.get('cull_screen_size', 0.15),
+                    'split_screen_size': kwargs.get('split_screen_size', 0.05),
+                    'sh_degree_interval': kwargs.get('sh_degree_interval', 1000),
+                    'background_color': kwargs.get('background_color', 'random'),
+                    # Frame tracking for persistent viewer
+                    'frame_idx': idx_seq,
                     'output_dir': output_dir / "nerfstudio_outputs",
                     'experiment_name': frame_name,
                     # Visualization settings - now properly wired to the dropdown
