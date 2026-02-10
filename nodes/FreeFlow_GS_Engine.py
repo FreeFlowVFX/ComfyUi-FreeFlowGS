@@ -1221,6 +1221,9 @@ class FreeFlow_GS_Engine:
         # Topology mode flag
         is_fixed_topology = "Fixed" in topology_mode
         
+        # Track work directories for delayed cleanup (Splatfacto needs previous frame's data during export)
+        work_dirs_to_cleanup = []
+        
         # 6. Loop
         for idx_seq, i in enumerate(indices_to_process):
             real_id = all_frame_numbers[i]
@@ -1573,7 +1576,24 @@ class FreeFlow_GS_Engine:
 
             # Cleanup
             if kwargs.get("cleanup_work_dirs", True):
-                shutil.rmtree(frame_work_dir, ignore_errors=True)
+                if is_splatfacto:
+                    # Delay cleanup until all frames complete (ns-export may need previous frame's data)
+                    work_dirs_to_cleanup.append(frame_work_dir)
+                else:
+                    # Brush/OpenSplat: cleanup immediately as usual
+                    shutil.rmtree(frame_work_dir, ignore_errors=True)
+
+        # Cleanup Splatfacto work directories after all frames complete
+        # This must happen AFTER the loop so ns-export can access previous frame data for warm start
+        cleanup_enabled = kwargs.get("cleanup_work_dirs", True)
+        if is_splatfacto and work_dirs_to_cleanup and cleanup_enabled:
+            FreeFlowUtils.log(f"🧹 Cleaning up {len(work_dirs_to_cleanup)} Splatfacto work directories...")
+            for work_dir in work_dirs_to_cleanup:
+                try:
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    print(f"   🗑️  Cleaned: {work_dir.name}")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to clean {work_dir.name}: {e}")
 
         # --- POST-PROCESS: TEMPORAL SMOOTHING (Stable) ---
         if apply_smoothing:

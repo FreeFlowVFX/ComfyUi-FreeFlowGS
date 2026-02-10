@@ -180,94 +180,97 @@ class SplatfactoEngine(IGSEngine):
         
         iterations = params.get('iterations', 30000)
         
+        # Check for masks first (needed for proper command ordering)
+        masks_dir = dataset_path / "masks"
+        has_masks = masks_dir.exists() and any(masks_dir.iterdir())
+        if has_masks:
+            print(f"[SplatfactoEngine] Masks detected: {masks_dir}")
+        
+        # Build command in CORRECT ORDER for nerfstudio CLI:
+        # 1. Base command (ns-train variant)
+        # 2. Model parameters (--pipeline.model.*)
+        # 3. Training parameters (--load-dir, --vis, etc.)
+        # 4. Data paths (--data, --output-dir)
+        # 5. Dataparser subcommand (colmap) and its args
+        # 6. Other flags (--downscale-factor)
+        
+        experiment_name = params.get('experiment_name', 'freeflow_frame')
+        viewer_port = params.get('viewer_port', 7007)
+        
         cmd = [
             str(ns_train),
             variant,
-            "--data", str(dataset_path),
-            "--output-dir", str(nerfstudio_output_dir),
-            "--max-num-iterations", str(iterations),
-            "--machine.device-type", device_type,
-            
-            # Model parameters
+        ]
+        
+        # --- MODEL PARAMETERS (must come before data paths) ---
+        cmd.extend([
             f"--pipeline.model.sh_degree={params.get('sh_degree', 3)}",
             f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.1)}",
             f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0008)}",
             f"--pipeline.model.use_scale_regularization={bool_str(params.get('use_scale_regularization', True))}",
-            
-            # Disable eval-all-images to prevent massive slowdown near end of training
-            # Default nerfstudio runs it at step 25000 which stalls for minutes
-            "--steps-per-eval-all-images", "0",
-        ]
-        
-        # --- MASK SUPPORT ---
-        # If masks/ folder exists in dataset, tell nerfstudio to use them
-        masks_dir = dataset_path / "masks"
-        if masks_dir.exists() and any(masks_dir.iterdir()):
-            cmd.extend(["colmap", "--colmap-path", "sparse/0", "--masks-path", "masks"])
-            print(f"[SplatfactoEngine] Masks detected: {masks_dir}")
-            self._masks_added_to_dataparser = True
-        else:
-            self._masks_added_to_dataparser = False
+        ])
         
         # --- FIXED TOPOLOGY MODE ---
-        # For stable 4D: disable culling, stop splitting, and stop refinement after frame 0
         if not params.get('continue_cull_post_densification', True):
-            cmd.append("--pipeline.model.continue_cull_post_densification=False")
-            # Also lock densification for truly fixed topology
-            cmd.append(f"--pipeline.model.stop_split_at=0")
-            cmd.append(f"--pipeline.model.refine_every=999999")
+            cmd.extend([
+                "--pipeline.model.continue_cull_post_densification=False",
+                "--pipeline.model.stop_split_at=0",
+                "--pipeline.model.refine_every=999999",
+            ])
             print(f"[SplatfactoEngine] Fixed topology: culling, splitting, and refinement disabled")
         
-        # --- WARM START ---
-        # Load from previous nerfstudio checkpoint directory if available
-        # This enables true warm start: transfers learned colors, opacities, covariances
-        # (not just positions like the points3D.txt seeding approach)
+        # --- WARM START (checkpoint loading) ---
         nerfstudio_checkpoint_dir = params.get('nerfstudio_checkpoint_dir')
         if nerfstudio_checkpoint_dir and Path(nerfstudio_checkpoint_dir).is_dir():
             cmd.extend(["--load-dir", str(nerfstudio_checkpoint_dir)])
             print(f"[SplatfactoEngine] Warm start from checkpoint: {nerfstudio_checkpoint_dir}")
         elif prev_ply_path and Path(prev_ply_path).exists():
-            # PLY file can't be loaded directly as checkpoint - points3D.txt seeding
-            # is handled by the orchestrator before calling train()
             print(f"[SplatfactoEngine] Using points3D.txt seeding for initialization")
         
-        # --- VIEWER / VISUALIZATION ---
-        # Splatfacto always uses the Viser web viewer (nerfstudio's only real-time preview)
-        # The viewer is lightweight and doesn't slow down training
-        viewer_port = params.get('viewer_port', 7007)
-        cmd.extend(["--vis", "viewer"])
-        cmd.append(f"--viewer.websocket-port={viewer_port}")
-        # Process must exit cleanly after training (not hang waiting for ctrl+c)
-        cmd.append("--viewer.quit-on-train-completion=True")
-        print(f"[SplatfactoEngine] Viser viewer at http://localhost:{viewer_port}")
-        
-        # Auto-open browser ONCE on first frame only
-        if not self._browser_opened:
-            self._browser_opened = True
-            def open_viewer_browser(port):
-                time.sleep(5)  # Wait for viser server to start
-                import webbrowser
-                webbrowser.open(f"http://localhost:{port}")
-                print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
-            browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
-            browser_thread.start()
+        # --- VISUALIZATION (only if not Off) ---
+        visualize_mode = params.get('visualize_training', 'Off')
+        if visualize_mode != "Off":
+            cmd.extend([
+                "--vis", "viewer",
+                f"--viewer.websocket-port={viewer_port}",
+                "--viewer.quit-on-train-completion=True",
+            ])
+            print(f"[SplatfactoEngine] Viser viewer at http://localhost:{viewer_port}")
+            
+            # Auto-open browser ONCE on first frame only
+            if not self._browser_opened:
+                self._browser_opened = True
+                def open_viewer_browser(port):
+                    time.sleep(5)
+                    import webbrowser
+                    webbrowser.open(f"http://localhost:{port}")
+                    print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
+                browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
+                browser_thread.start()
         
         # --- LOGGING ---
-        # Set experiment name for organized outputs
-        experiment_name = params.get('experiment_name', 'freeflow_frame')
         cmd.extend(["--experiment-name", experiment_name])
         
-        # --- DATAPARSER ---
-        # Add colmap dataparser for COLMAP-format datasets
-        # This must come AFTER all model options
-        # Dataparser-specific options come AFTER the dataparser subcommand
-        if not self._masks_added_to_dataparser:
-            # Masks block already added colmap + colmap-path + masks-path
-            cmd.append("colmap")
-            # Override default colmap path (colmap/sparse/0) to match FreeFlow's output structure
-            cmd.extend(["--colmap-path", "sparse/0"])
+        # --- TRAINING PARAMETERS ---
+        cmd.extend([
+            "--max-num-iterations", str(iterations),
+            "--machine.device-type", device_type,
+            "--steps-per-eval-all-images", "0",  # Prevent slowdown at end
+        ])
         
-        # Disable automatic downscaling to prevent interactive prompts in headless mode
+        # --- DATA PATHS ---
+        cmd.extend([
+            "--data", str(dataset_path),
+            "--output-dir", str(nerfstudio_output_dir),
+        ])
+        
+        # --- DATAPARSER (must come AFTER all training parameters) ---
+        cmd.append("colmap")
+        cmd.extend(["--colmap-path", "sparse/0"])
+        if has_masks:
+            cmd.extend(["--masks-path", "masks"])
+        
+        # --- OTHER FLAGS ---
         cmd.extend(["--downscale-factor", "1"])
         
         print(f"[SplatfactoEngine] Running: {' '.join(cmd)}")
@@ -489,23 +492,21 @@ class SplatfactoEngine(IGSEngine):
         Find the config.yml file from nerfstudio training output.
         
         Nerfstudio saves to: output_dir/experiment_name/splatfacto/TIMESTAMP/config.yml
-        """
-        # Search pattern
-        search_paths = [
-            output_dir / experiment_name,
-            output_dir,
-        ]
         
-        for base_path in search_paths:
-            if not base_path.exists():
-                continue
-            
-            # Find most recent config.yml
-            configs = list(base_path.rglob("config.yml"))
-            if configs:
-                # Sort by modification time, newest first
-                configs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                return configs[0]
+        IMPORTANT: Only search within the specific experiment directory to avoid
+        finding the wrong config when multiple frames are trained.
+        """
+        # Only search within the specific experiment directory
+        experiment_dir = output_dir / experiment_name
+        if not experiment_dir.exists():
+            return None
+        
+        # Find config.yml within this specific experiment only
+        configs = list(experiment_dir.rglob("config.yml"))
+        if configs:
+            # Sort by modification time, newest first (in case multiple timestamps exist)
+            configs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return configs[0]
         
         return None
     
