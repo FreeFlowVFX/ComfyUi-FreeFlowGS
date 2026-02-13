@@ -98,8 +98,12 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 # DATA INPUTS
                 # ═══════════════════════════════════════════════════════════════
-                "multicam_feed": ("MULTICAM_DICT",),
-                "colmap_anchor": ("COLMAP_DATA",),
+                "multicam_feed": ("MULTICAM_DICT", {
+                    "tooltip": "Multi-camera input sequence dictionary. Provide synchronized frame lists for each camera."
+                }),
+                "colmap_anchor": ("COLMAP_DATA", {
+                    "tooltip": "COLMAP anchor reconstruction used for camera calibration and initial sparse geometry."
+                }),
             },
             "optional": {
                 # ═══════════════════════════════════════════════════════════════
@@ -113,28 +117,30 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 # CINEMA GUIDANCE (Optional mesh-based initialization)
                 # ═══════════════════════════════════════════════════════════════
-                "guidance_mesh": ("GUIDANCE_MESH_SEQUENCE",),
+                "guidance_mesh": ("GUIDANCE_MESH_SEQUENCE", {
+                    "tooltip": "Optional per-frame mesh guidance for warp-based initialization. Use only if you have a matching mesh sequence."
+                }),
                 
                 # ═══════════════════════════════════════════════════════════════
                 # VISUALIZATION & MONITORING [SHARED]
                 # ═══════════════════════════════════════════════════════════════
                 "visualize_training": (["Off", "Save Preview Images", "Spawn Native GUI"], {
                     "default": "Off",
-                    "tooltip": "Off: Headless. Save Preview Images: Renders to TrainingPreviews folder. Spawn Native GUI: Brush native window or Splatfacto Viser viewer (localhost:7007)."
+                    "tooltip": "Training visualization mode. Off is fastest. Save Preview Images writes periodic snapshots. Spawn Native GUI opens Brush's live app window."
                 }),
                 "preview_interval": ("INT", {
                     "default": 500, "min": 100, "max": 10000,
-                    "tooltip": "Steps between preview renders. Lower = more frequent but slower training."
+                    "tooltip": "Steps between preview renders. Lower values give more frequent previews but add overhead."
                 }),
                 
                 # --- Brush-only preview controls ---
                 "preview_camera_filter": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "[Brush only] Filter previews to cameras containing this string. Empty = show all."
+                    "tooltip": "Brush-only preview filter. Show only camera names containing this text. Leave empty to include all cameras."
                 }),
                 "eval_camera_index": ("INT", {
                     "default": 10, "min": 1, "max": 100,
-                    "tooltip": "[Brush only] Render every Nth camera. Higher = faster previews."
+                    "tooltip": "Brush-only preview stride. Render every Nth camera during preview. Higher is faster, lower is more complete."
                 }),
 
                 # ═══════════════════════════════════════════════════════════════
@@ -142,11 +148,15 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Stable)"], {
                     "default": "Dynamic (Default-Flicker)",
-                    "tooltip": "Dynamic: Points grow/shrink freely (may flicker). Fixed: Lock topology after Frame 0 for smooth video."
+                    "tooltip": "Topology behavior across frames. Dynamic allows point count changes. Fixed locks topology after anchor for smoother temporal post-processing."
+                }),
+                "realign_topology": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reorder splats consistently between frames before smoothing. Recommended when using Fixed mode and temporal filtering."
                 }),
                 "apply_smoothing": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Apply temporal smoothing filter. Requires Fixed topology mode."
+                    "tooltip": "Run temporal smoothing on the final sequence. Works best with Fixed topology and at least 4 frames."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -154,11 +164,11 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "iterations": ("INT", {
                     "default": 4000, "min": 100, "max": 100000,
-                    "tooltip": "Training steps per frame. Brush: 4000-8000. Splatfacto: 15000-30000."
+                    "tooltip": "Training steps per frame. Higher improves quality but increases time. Typical: Brush 4k-8k, Splatfacto 15k-30k."
                 }),
                 "sh_degree": ("INT", {
                     "default": 3, "min": 0, "max": 3,
-                    "tooltip": "Spherical harmonics degree. 3 = view-dependent effects. 0 = flat colors (faster)."
+                    "tooltip": "View-dependent color complexity. 3 gives best realism; 0 is flat color and faster."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -166,47 +176,47 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "splat_count": ("INT", {
                     "default": 500000, "min": 1000, "max": 10000000,
-                    "tooltip": "[Brush] Maximum splat count. 500k for production, 100k for previews."
+                    "tooltip": "Brush max splat budget. Higher can improve detail but increases memory and export size."
                 }),
                 "learning_rate": ("FLOAT", {
                     "default": 0.00002, "min": 0.000001, "max": 0.001, "step": 0.000001,
-                    "tooltip": "[Brush] Position learning rate. Lower = more stable."
+                    "tooltip": "Brush position learning rate. Lower is more stable, higher adapts faster but may jitter."
                 }),
                 "densification_interval": ("INT", {
                     "default": 200, "min": 10, "max": 1000,
-                    "tooltip": "[Brush] Steps between point refinement (--refine-every)."
+                    "tooltip": "Brush densification interval. Lower refines more often, higher is more conservative and stable."
                 }),
                 "densify_grad_threshold": ("FLOAT", {
                     "default": 0.00004, "min": 0.000001, "max": 0.01, "step": 0.000001,
-                    "tooltip": "[Brush] Gradient threshold for point splitting. Lower = more aggressive growth."
+                    "tooltip": "Brush growth threshold. Lower creates more splats, higher reduces noise and growth."
                 }),
                 "growth_select_fraction": ("FLOAT", {
                     "default": 0.1, "min": 0.01, "max": 1.0, "step": 0.01,
-                    "tooltip": "[Brush] Fraction of splats that grow when needed. Lower = less aggressive (helps prevent drift)."
+                    "tooltip": "Brush growth fraction per refine step. Lower is safer and less drift-prone; higher grows faster."
                 }),
                 "feature_lr": ("FLOAT", {
                     "default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001,
-                    "tooltip": "[Brush] Color/SH coefficient learning rate (--lr-coeffs-dc)."
+                    "tooltip": "Brush color/feature learning rate. Higher adapts color quickly but can increase flicker or saturation."
                 }),
                 "gaussian_lr": ("FLOAT", {
                     "default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001,
-                    "tooltip": "[Brush] Scale/shape learning rate (--lr-scale). Very low (0.00016) for stable 4D geometry."
+                    "tooltip": "Brush scale/shape learning rate. Keep low for stable geometry; high values can cause stretching artifacts."
                 }),
                 "opacity_lr": ("FLOAT", {
                     "default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001,
-                    "tooltip": "[Brush] Opacity learning rate (--lr-opac)."
+                    "tooltip": "Brush opacity learning rate. Higher prunes/reveals faster but may destabilize thin details."
                 }),
                 "scale_loss_weight": ("FLOAT", {
                     "default": 1e-8, "min": 1e-10, "max": 1e-5, "step": 1e-9,
-                    "tooltip": "[Brush] Scale regularization weight. Higher = prevents splat explosion/drift toward cameras."
+                    "tooltip": "Brush scale regularization strength. Increase to suppress exploding or elongated splats."
                 }),
-                "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {
-                    "default": "Optical Flow (Robust)",
-                    "tooltip": "[Brush] Motion detection method for masking."
+                "masking_method": (["None (No Masking)", "Optical Flow (Robust)", "Simple Diff (Fast)"], {
+                    "default": "None (No Masking)",
+                    "tooltip": "Mask generation method for moving regions. None disables masks. Optical Flow is robust, Simple Diff is faster."
                 }),
                 "motion_sensitivity": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "[Brush] Motion mask sensitivity. 0 = no masking."
+                    "tooltip": "Mask sensitivity for motion detection. Lower catches subtle motion; higher keeps only strong motion."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -214,53 +224,57 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "splatfacto_variant": (["splatfacto", "splatfacto-big", "splatfacto-w"], {
                     "default": "splatfacto",
-                    "tooltip": "[Splatfacto] Model variant. big = higher capacity. w = appearance embedding."
+                    "tooltip": "Splatfacto model type. splatfacto is balanced, big is higher quality/cost, w adds appearance embedding for lighting variation."
+                }),
+                "splatfacto_viewer": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Open Splatfacto's live viewer in browser during training. Useful for inspection, adds overhead."
                 }),
                 "cull_alpha_thresh": ("FLOAT", {
-                    "default": 0.005, "min": 0.001, "max": 0.5, "step": 0.001,
-                    "tooltip": "[Splatfacto] Alpha threshold for culling transparent splats."
+                    "default": 0.3, "min": 0.001, "max": 0.5, "step": 0.001,
+                    "tooltip": "Splatfacto opacity culling threshold. Higher removes more dark/transparent junk splats. Lower keeps more faint detail."
                 }),
                 "splatfacto_densify_grad_thresh": ("FLOAT", {
-                    "default": 0.0002, "min": 0.0001, "max": 0.01, "step": 0.0001,
-                    "tooltip": "[Splatfacto] Gradient threshold for densification."
+                    "default": 0.0015, "min": 0.0001, "max": 0.01, "step": 0.0001,
+                    "tooltip": "Splatfacto growth threshold. Higher reduces aggressive growth and garbage splats; lower adds detail faster."
                 }),
                 "use_scale_regularization": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "[Splatfacto] Prevent splat explosion with scale regularization."
+                    "tooltip": "Splatfacto anti-stretch regularization. Keep enabled to reduce elongated, noisy, and unstable splats."
                 }),
-                
+
                 # --- Advanced Splatfacto Parameters ---
                 "max_gs_num": ("INT", {
                     "default": 1000000, "min": 1000, "max": 10000000,
-                    "tooltip": "[Splatfacto] Maximum number of Gaussians (equivalent to Brush splat_count)."
+                    "tooltip": "Maximum Gaussian cap (advanced). Only relevant on newer/MCMC strategies; ignored by most default runs."
                 }),
                 "refine_every": ("INT", {
-                    "default": 100, "min": 10, "max": 1000,
-                    "tooltip": "[Splatfacto] How often to densify/prune (lower = more frequent)."
+                    "default": 150, "min": 10, "max": 1000,
+                    "tooltip": "Splatfacto refine interval. Lower refines more often; higher is cleaner and less noisy."
                 }),
                 "warmup_length": ("INT", {
-                    "default": 500, "min": 0, "max": 5000,
-                    "tooltip": "[Splatfacto] Steps before refinement starts."
+                    "default": 1000, "min": 0, "max": 5000,
+                    "tooltip": "Initial steps before densify/prune begins. Longer warmup stabilizes early geometry and reduces junk growth."
                 }),
                 "num_downscales": ("INT", {
                     "default": 2, "min": 0, "max": 5,
-                    "tooltip": "[Splatfacto] Initial resolution 1/2^d (affects quality/speed)."
+                    "tooltip": "Initial image downscale level. Higher is faster but softer; lower is sharper but heavier."
                 }),
                 "cull_screen_size": ("FLOAT", {
                     "default": 0.15, "min": 0.01, "max": 1.0, "step": 0.01,
-                    "tooltip": "[Splatfacto] Screen % threshold for culling (advanced)."
+                    "tooltip": "Cull oversized splats by screen footprint (advanced). Increase to remove large floaters more aggressively."
                 }),
                 "split_screen_size": ("FLOAT", {
                     "default": 0.05, "min": 0.01, "max": 1.0, "step": 0.01,
-                    "tooltip": "[Splatfacto] Screen % threshold for splitting (advanced)."
+                    "tooltip": "Split threshold by screen footprint (advanced). Lower splits more often; higher is more conservative."
                 }),
                 "sh_degree_interval": ("INT", {
                     "default": 1000, "min": 100, "max": 10000,
-                    "tooltip": "[Splatfacto] SH degree increase interval (advanced)."
+                    "tooltip": "How often SH complexity increases (advanced). Lower learns view-dependent color sooner."
                 }),
                 "background_color": (["random", "black", "white"], {
-                    "default": "random",
-                    "tooltip": "[Splatfacto] Background color during training (advanced)."
+                    "default": "black",
+                    "tooltip": "Training background color. Black is typically most stable for reducing bright halos and overexposure artifacts."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -268,11 +282,11 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "frame_selection": ("STRING", {
                     "default": "all", "multiline": False,
-                    "tooltip": "Frames to process: 'all', '0-50', '0,5,10', '100-200'."
+                    "tooltip": "Frames to process. Examples: all, 0-50, 0,5,10, 100-200."
                 }),
                 "init_from_sparse": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Initialize from COLMAP sparse points. Essential for correct scale."
+                    "tooltip": "Start from COLMAP sparse points. Keep enabled for correct scene scale and faster convergence."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -280,19 +294,19 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "filename_prefix": ("STRING", {
                     "default": "FreeFlow_GS", "multiline": False,
-                    "tooltip": "Output filename prefix: {prefix}_frame_0001.ply"
+                    "tooltip": "Output file prefix. Final files are named like {prefix}_frame_0001.ply."
                 }),
                 "custom_output_path": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Custom output folder. Empty = ComfyUI output directory."
+                    "tooltip": "Custom output folder path. Leave empty to use ComfyUI default output directory."
                 }),
                 "use_symlinks": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Use symlinks instead of copying images. Saves disk space."
+                    "tooltip": "Use symlinks for dataset images instead of copying. Faster and smaller disk usage."
                 }),
                 "cleanup_work_dirs": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Delete work folders after each frame."
+                    "tooltip": "Delete temporary per-frame work folders after completion to save disk space."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -300,19 +314,19 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "distributed_anchor": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable multi-machine rendering with shared anchor."
+                    "tooltip": "Enable distributed workflow with a shared anchor frame/model across machines."
                 }),
                 "distributed_anchor_path": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Path to pre-trained anchor PLY. Empty = auto-generate."
+                    "tooltip": "Path to an existing anchor PLY for distributed runs. Leave empty to auto-create anchor."
                 }),
                 "distributed_anchor_frame": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Frame number to use as anchor. Empty = first frame."
+                    "tooltip": "Frame ID to use as anchor. Leave empty to use the first selected frame."
                 }),
                 "warmup_frames": ("INT", {
                     "default": 0, "min": 0, "max": 1000,
-                    "tooltip": "Frames to train without saving (for overlap in distributed mode)."
+                    "tooltip": "Number of initial frames to train without final export (useful for distributed overlap/warmup)."
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -320,7 +334,7 @@ class FreeFlow_GS_Engine:
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("ply_sequence_output",)
-    FUNCTION = "execute_cinema_pipeline"
+    FUNCTION = "execute_training_pipeline"
     CATEGORY = "FreeFlow"
     OUTPUT_NODE = True
 
@@ -491,6 +505,12 @@ class FreeFlow_GS_Engine:
                 dst_name = filename_map.get(cam, f"{cam}{src_img.suffix}")
                 dst_img = img_dir / dst_name
                 
+                # Diagnostic: Verify linking for first few cameras
+                if active_cams < 3:
+                     print(f"[FreeFlow] Data Prep: Linked {src_img.name} -> {dst_img.name}")
+                
+                dst_img = img_dir / dst_name
+                
                 mask_applied = False
                 if mask_engine and prev_images_paths and prev_images_paths.get(cam):
                     # Compute Opical Flow Mask
@@ -500,7 +520,7 @@ class FreeFlow_GS_Engine:
                     if generated_mask:
                         mask_dir = frame_work_dir / "masks"
                         mask_dir.mkdir(exist_ok=True)
-                        dst_mask = mask_dir / f"{dst_name}.png"
+                        dst_mask = mask_dir / f"{Path(dst_name).stem}.png"
                         shutil.move(str(generated_mask), dst_mask)
                         mask_applied = True
                 
@@ -942,6 +962,13 @@ class FreeFlow_GS_Engine:
                 
                 for p in points:
                     f_out.write(f"{p[0]} {p[1]:.6f} {p[2]:.6f} {p[3]:.6f} {p[4]} {p[5]} {p[6]} 0.0\n")
+            
+            # Delete points3D.bin if it exists — nerfstudio checks .bin FIRST
+            # and would read the COLMAP sparse instead of our warm start positions
+            bin_path = out_path.with_suffix(".bin")
+            if bin_path.exists():
+                bin_path.unlink()
+                FreeFlowUtils.log("Deleted points3D.bin (nerfstudio will read our .txt)", "INFO")
                     
             return True
 
@@ -1111,7 +1138,7 @@ class FreeFlow_GS_Engine:
     #   MAIN EXECUTION
     # ==================================================================================
 
-    def execute_cinema_pipeline(self, multicam_feed, colmap_anchor, 
+    def execute_training_pipeline(self, multicam_feed, colmap_anchor, 
                                engine_backend="Brush (Fast)",
                                guidance_mesh=None, topology_mode="Dynamic (Default-Flicker)",
                                apply_smoothing=False, realign_topology=True,
@@ -1119,6 +1146,9 @@ class FreeFlow_GS_Engine:
                                iterations=4000, 
                                **kwargs):
         
+        # Safety: handle if a saved workflow somehow passes a boolean
+        if isinstance(visualize_training, bool):
+            visualize_training = "Spawn Native GUI" if visualize_training else "Off"
         # 1. Select Engine Strategy
         engine = None
         is_splatfacto = False
@@ -1128,6 +1158,13 @@ class FreeFlow_GS_Engine:
             engine = BrushEngine()
         elif "Splatfacto" in engine_backend or "Nerfstudio" in engine_backend:
             engine = SplatfactoEngine()
+            
+            # Override visualizer based on the Splatfacto-specific boolean toggle
+            # (visualize_training dropdown is hidden for Splatfacto in UI)
+            if kwargs.get("splatfacto_viewer", False):
+                visualize_training = "Spawn Native GUI"
+            else:
+                visualize_training = "Off"
             
             # Auto-install nerfstudio if not available
             if not engine.is_available():
@@ -1178,8 +1215,14 @@ class FreeFlow_GS_Engine:
         FreeFlowUtils.log(f"✅ Output Directory set to: {output_dir}")
         
         # 3. Helpers
-        from .modules.motion_masking import MotionMasking
-        mask_engine = MotionMasking(sensitivity=kwargs.get("motion_sensitivity", 0.3))
+        masking_method = kwargs.get("masking_method", "None (No Masking)")
+        if masking_method == "None (No Masking)":
+            mask_engine = None
+            FreeFlowUtils.log("Masking: Disabled (No Masking)", "INFO")
+        else:
+            from .modules.motion_masking import MotionMasking
+            mask_engine = MotionMasking(sensitivity=kwargs.get("motion_sensitivity", 0.3))
+            FreeFlowUtils.log(f"Masking: {masking_method} (sensitivity={kwargs.get('motion_sensitivity', 0.3)})", "INFO")
         
         # 4. Frame Management
         cameras = list(multicam_feed.keys())
@@ -1398,19 +1441,16 @@ class FreeFlow_GS_Engine:
                 
                 params.update({
                     'splatfacto_variant': kwargs.get('splatfacto_variant', 'splatfacto'),
-                    'cull_alpha_thresh': kwargs.get('cull_alpha_thresh', 0.005),
-                    'densify_grad_thresh': kwargs.get('splatfacto_densify_grad_thresh', 0.0002),
+                    'cull_alpha_thresh': kwargs.get('cull_alpha_thresh', 0.3),
+                    'densify_grad_thresh': kwargs.get('splatfacto_densify_grad_thresh', 0.0015),
                     'use_scale_regularization': kwargs.get('use_scale_regularization', True),
-                    # New advanced Splatfacto parameters
-                    'max_gs_num': kwargs.get('max_gs_num', 1000000),
-                    'refine_every': kwargs.get('refine_every', 100),
-                    'warmup_length': kwargs.get('warmup_length', 500),
+                    'refine_every': kwargs.get('refine_every', 150),
+                    'warmup_length': kwargs.get('warmup_length', 1000),
                     'num_downscales': kwargs.get('num_downscales', 2),
                     'cull_screen_size': kwargs.get('cull_screen_size', 0.15),
                     'split_screen_size': kwargs.get('split_screen_size', 0.05),
                     'sh_degree_interval': kwargs.get('sh_degree_interval', 1000),
-                    'background_color': kwargs.get('background_color', 'random'),
-                    # Frame tracking for persistent viewer
+                    'background_color': kwargs.get('background_color', 'black'),
                     'frame_idx': idx_seq,
                     'output_dir': output_dir / "nerfstudio_outputs",
                     'experiment_name': frame_name,
@@ -1422,10 +1462,12 @@ class FreeFlow_GS_Engine:
                     'previews_dir': str(previews_dir),
                     'preview_callback': splatfacto_preview_callback,
                 })
-                # Fixed topology for Splatfacto: disable culling after densification
+                # Fixed topology for Splatfacto: lock immediately after anchor frame
+                # Frame 0: Establish topology (allow densification)
+                # Frame 1+: Lock topology (no further densification)
                 if is_fixed_topology and idx_seq > 0:
                     params['continue_cull_post_densification'] = False
-                    print(f"   🔒 [Fixed Topology] Frame {i}: Splatfacto culling disabled")
+                    print(f"   🔒 [Fixed Topology] Frame {real_id}: Splatfacto topology locked (no densification)")
             elif is_opensplat:
                 # OpenSplat params - uses similar COLMAP format, simpler config
                 params.update({
@@ -1445,8 +1487,10 @@ class FreeFlow_GS_Engine:
                     'eval_camera_index': kwargs.get('eval_camera_index', 10),
                 })
                 
-                # --- DENSIFICATION PARAMS (only in Dynamic mode) ---
-                if not is_fixed_topology or idx_seq == 0:
+                # --- DENSIFICATION PARAMS (Dynamic mode only) ---
+                # In Fixed mode, Frame 0 uses Brush defaults for maximum growth
+                # Frame 1+ has densification disabled by Fixed Topology settings
+                if not is_fixed_topology:
                     params.update({
                         'densification_interval': kwargs.get('densification_interval', 200),
                         'densify_grad_threshold': kwargs.get('densify_grad_threshold', 0.00004),
@@ -1466,10 +1510,13 @@ class FreeFlow_GS_Engine:
                 })
                 
                 # Add Fixed Topology CLI flags for Brush if enabled AND not first frame
-                if is_fixed_topology and idx_seq > 0:
+                # Frame 0: Establish topology (allow densification with defaults for max growth)
+                # Frame 1: Adapt from warm start (allow densification to adjust to new frame)
+                # Frame 2+: Fixed topology (lock to preserve established structure)
+                if is_fixed_topology and idx_seq > 1:
                     params['growth_stop_iter'] = 0  # Stop adding points immediately (no growth)
-                    params['refine_every'] = 999999  # Disable refinement (no split/clone/replace)
-                    print(f"   🔒 [Fixed Topology] Frame {i}: Topology Locked (Strict Frozen Mode)")
+                    params['densification_interval'] = 999999  # Disable refinement (no split/clone/replace)
+                    print(f"   🔒 [Fixed Topology] Frame {real_id}: Topology Locked (Strict Frozen Mode)")
             
             # Setup progress bar thread with adaptive timing
             if self._cached_seconds_per_step is not None:
@@ -1570,7 +1617,10 @@ class FreeFlow_GS_Engine:
                 if visualize_training == "Save Preview Images" and unique_id:
                     self._preview_step_counter[frame_name] = 0
                 
-                # Pass nerfstudio checkpoint from previous frame for true warm start
+                # Pass nerfstudio checkpoint from previous frame for warm start
+                # (preserves all Gaussian attributes: positions, scales, rotations,
+                # opacities, SH coefficients — by seeding model with checkpoint points
+                # so Gaussian count matches, then loading weights)
                 if is_splatfacto and hasattr(engine, 'last_checkpoint_dir') and engine.last_checkpoint_dir:
                     params['nerfstudio_checkpoint_dir'] = str(engine.last_checkpoint_dir)
                 

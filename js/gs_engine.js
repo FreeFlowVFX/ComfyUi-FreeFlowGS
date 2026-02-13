@@ -6,7 +6,7 @@ import { api } from "../../scripts/api.js";
  * Handles conditional visibility of parameters based on engine selection.
  * 
  * Parameter Groups:
- * - Shared: visualize_training, preview_interval, topology_mode, iterations, sh_degree, etc.
+ * - Shared: spawn_native_gui, preview_interval, topology_mode, iterations, sh_degree, etc.
  * - Brush-only: splat_count, learning_rate, densification_interval, etc.
  * - Splatfacto-only: splatfacto_variant, cull_alpha_thresh, etc.
  * - Conditional: preview_camera_filter (Brush + Save Preview), apply_smoothing (Fixed topology)
@@ -26,14 +26,24 @@ app.registerExtension({
                 // ═══════════════════════════════════════════════════════════════
                 // PARAMETER GROUPS
                 // ═══════════════════════════════════════════════════════════════
-                
+
                 // Engine selector
                 const engineWidget = findWidget("engine_backend");
 
+                // Visualization widget (needed for filtering options and visibility)
+                const vizWidget = findWidget("visualize_training");
+
+                // --- Preview params (Brush + Save Preview mode only) ---
+                const previewParams = [
+                    "preview_interval"
+                ];
+
                 // --- Brush-specific params ---
                 const brushParams = [
+                    "visualize_training",
+                    "preview_interval",
                     "splat_count",
-                    "learning_rate", 
+                    "learning_rate",
                     "densification_interval",
                     "densify_grad_threshold",
                     "growth_select_fraction",
@@ -41,39 +51,39 @@ app.registerExtension({
                     "gaussian_lr",
                     "opacity_lr",
                     "scale_loss_weight",
-                    "masking_method",
-                    "motion_sensitivity",
                     // Brush-only preview controls
                     "preview_camera_filter",
                     "eval_camera_index"
                 ];
 
+                // --- Masking params (shared across all engines) ---
+                const maskingParams = [
+                    "masking_method",
+                    "motion_sensitivity"
+                ];
+
                 // --- Splatfacto-specific params ---
                 const splatfactoParams = [
+                    "splatfacto_viewer",
                     "splatfacto_variant",
                     "cull_alpha_thresh",
                     "splatfacto_densify_grad_thresh",
                     "use_scale_regularization",
-                    "warmup_length",
-                    "refine_every",
-                    "num_downscales",
                     "max_gs_num",
+                    "refine_every",
+                    "warmup_length",
+                    "num_downscales",
                     "cull_screen_size",
                     "split_screen_size",
                     "sh_degree_interval",
                     "background_color"
                 ];
 
-                // --- Visualization params (show when NOT "Off") ---
-                const vizWidget = findWidget("visualize_training");
-                const previewParams = [
-                    "preview_interval"
-                    // preview_camera_filter and eval_camera_index are Brush-only, handled separately
-                ];
 
                 // --- Topology params (show when "Fixed") ---
                 const topoWidget = findWidget("topology_mode");
                 const fixedTopoParams = [
+                    "realign_topology",
                     "apply_smoothing"
                 ];
 
@@ -92,7 +102,7 @@ app.registerExtension({
                 // ═══════════════════════════════════════════════════════════════
                 // SERIALIZATION HOOKS
                 // ═══════════════════════════════════════════════════════════════
-                
+
                 const onSerialize = this.onSerialize;
                 this.onSerialize = function (o) {
                     if (onSerialize) onSerialize.apply(this, arguments);
@@ -106,10 +116,10 @@ app.registerExtension({
                 this.onConfigure = function (o) {
                     if (onConfigure) onConfigure.apply(this, arguments);
 
-                    if (this._freeflow_all_widgets && o.widgets_values && 
+                    if (this._freeflow_all_widgets && o.widgets_values &&
                         o.widgets_values.length < this._freeflow_all_widgets.length) {
                         console.log("[FreeFlow GS] Detected version mismatch. Attempting smart restoration...");
-                        
+
                         const saved = o.widgets_values;
                         let savedIdx = 0;
                         const currentVals = {};
@@ -129,12 +139,14 @@ app.registerExtension({
                             const dist = currentVals["distributed_anchor"];
 
                             let visible = true;
-                            if (brushParams.includes(w.name)) {
+                            if (maskingParams.includes(w.name)) {
+                                visible = true; // Always visible for all engines
+                            } else if (brushParams.includes(w.name)) {
                                 visible = isBrush;
                             } else if (splatfactoParams.includes(w.name)) {
                                 visible = isSplatfacto;
                             } else if (previewParams.includes(w.name)) {
-                                visible = (viz !== "Off");
+                                visible = isBrush;
                             } else if (fixedTopoParams.includes(w.name)) {
                                 visible = (topo && topo.includes("Fixed"));
                             } else if (distributedParams.includes(w.name)) {
@@ -155,91 +167,112 @@ app.registerExtension({
                 // ═══════════════════════════════════════════════════════════════
                 // MAIN VISIBILITY UPDATE FUNCTION
                 // ═══════════════════════════════════════════════════════════════
-                
-                // Store original options for visualize_training
-                const originalVizOptions = vizWidget ? [...vizWidget.options] : ["Off", "Save Preview Images", "Spawn Native GUI"];
-                
-                const updateVisibility = () => {
-                    const engine = engineWidget ? engineWidget.value : "Brush (Fast)";
-                    const isBrush = engine && engine.includes("Brush");
-                    const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
-                    const isOpenSplat = engine && engine.includes("OpenSplat");
 
-                    // --- Update visualization options based on engine ---
-                    if (vizWidget) {
-                        let newOptions;
-                        if (isBrush) {
-                            newOptions = ["Off", "Save Preview Images", "Spawn Native GUI"];
-                        } else if (isSplatfacto) {
-                            newOptions = ["Off", "Spawn Native GUI"];
-                        } else {
-                            // OpenSplat - no visualization support yet
-                            newOptions = ["Off"];
-                        }
-                        
-                        // Only update if options changed
-                        if (JSON.stringify(vizWidget.options) !== JSON.stringify(newOptions)) {
-                            vizWidget.options = newOptions;
-                            // Reset to "Off" if current selection not in new options
-                            if (!newOptions.includes(vizWidget.value)) {
+                const getComboOptions = (widget) => {
+                    if (!widget || !widget.options) return [];
+                    if (Array.isArray(widget.options)) return [...widget.options];
+                    if (Array.isArray(widget.options.values)) return [...widget.options.values];
+                    return [];
+                };
+
+                const setComboOptions = (widget, values) => {
+                    if (!widget) return;
+                    if (Array.isArray(widget.options)) {
+                        widget.options = [...values];
+                    } else if (widget.options && Array.isArray(widget.options.values)) {
+                        widget.options.values = [...values];
+                    }
+                };
+
+                const updateVisibility = () => {
+                    try {
+                        const engine = engineWidget ? engineWidget.value : "Brush (Fast)";
+                        const isBrush = engine && engine.includes("Brush");
+                        const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
+                        const isOpenSplat = engine && engine.includes("OpenSplat");
+
+                        // Filter visualization dropdown options based on engine
+                        if (vizWidget && vizWidget.options) {
+                            if (!vizWidget._originalOptions) {
+                                vizWidget._originalOptions = getComboOptions(vizWidget);
+                            }
+
+                            let allowedOptions;
+                            if (isBrush) {
+                                allowedOptions = ["Off", "Save Preview Images", "Spawn Native GUI"];
+                            } else if (isSplatfacto) {
+                                allowedOptions = ["Off", "Spawn Native GUI"];
+                            } else {
+                                allowedOptions = ["Off"];
+                            }
+
+                            const filtered = vizWidget._originalOptions.filter(opt => allowedOptions.includes(opt));
+                            setComboOptions(vizWidget, filtered);
+
+                            if (!allowedOptions.includes(vizWidget.value)) {
                                 vizWidget.value = "Off";
                             }
                         }
-                    }
 
-                    const vizMode = vizWidget ? vizWidget.value : "Off";
-                    const showPreviewParams = (vizMode !== "Off");
-                    const isSavePreview = (vizMode === "Save Preview Images");
+                        const vizMode = vizWidget ? vizWidget.value : "Off";
+                        const isSavePreview = (vizMode === "Save Preview Images");
 
-                    const topoMode = topoWidget ? topoWidget.value : "";
-                    const isFixedTopo = (topoMode && topoMode.includes("Fixed"));
+                        const topoMode = topoWidget ? topoWidget.value : "";
+                        const isFixedTopo = (topoMode && topoMode.includes("Fixed"));
 
-                    const showDistributed = distributedWidget ? distributedWidget.value : false;
+                        const showDistributed = distributedWidget ? distributedWidget.value : false;
 
-                    // Filter widgets based on current state
-                    this.widgets = allWidgets.filter(w => {
-                        // --- Engine-specific params ---
-                        if (brushParams.includes(w.name)) {
-                            // Special case: preview_camera_filter and eval_camera_index
-                            // Only show if Brush AND Save Preview Images mode
-                            if (w.name === "preview_camera_filter" || w.name === "eval_camera_index") {
+                        // Filter widgets based on current state
+                        this.widgets = allWidgets.filter(w => {
+                            // --- Masking params (show for ALL engines) ---
+                            if (maskingParams.includes(w.name)) {
+                                return true; // Always visible for all engines
+                            }
+
+                            // --- Engine-specific params ---
+                            if (brushParams.includes(w.name)) {
+                                // preview_camera_filter and eval_camera_index only in Save Preview mode
+                                if (w.name === "preview_camera_filter" || w.name === "eval_camera_index") {
+                                    return isBrush && isSavePreview;
+                                }
+                                return isBrush;
+                            }
+                            if (splatfactoParams.includes(w.name)) {
+                                return isSplatfacto;
+                            }
+
+                            // --- Preview interval (Brush + Save Preview mode only) ---
+                            if (previewParams.includes(w.name)) {
                                 return isBrush && isSavePreview;
                             }
-                            return isBrush;
-                        }
-                        if (splatfactoParams.includes(w.name)) {
-                            return isSplatfacto;
-                        }
-                        
-                        // --- Preview interval (shared, but only when viz is not Off) ---
-                        if (previewParams.includes(w.name)) {
-                            return showPreviewParams;
-                        }
-                        
-                        // --- Topology params (only when Fixed mode) ---
-                        if (fixedTopoParams.includes(w.name)) {
-                            return isFixedTopo;
-                        }
-                        
-                        // --- Distributed params (only when enabled) ---
-                        if (distributedParams.includes(w.name)) {
-                            return showDistributed;
-                        }
-                        
-                        // --- OpenSplat currently uses shared params only ---
-                        // No OpenSplat-specific params yet
-                        
-                        return true; // Show all other params
-                    });
 
-                    this.setSize([this.size[0], this.computeSize([this.size[0], this.size[1]])[1]]);
-                    if (app.canvas) app.canvas.setDirty(true, true);
+                            // --- Topology params (only when Fixed mode) ---
+                            if (fixedTopoParams.includes(w.name)) {
+                                return isFixedTopo;
+                            }
+
+                            // --- Distributed params (only when enabled) ---
+                            if (distributedParams.includes(w.name)) {
+                                return showDistributed;
+                            }
+
+                            // --- OpenSplat currently uses shared params only ---
+                            // No OpenSplat-specific params yet
+
+                            return true; // Show all other params
+                        });
+
+                        this.setSize([this.size[0], this.computeSize([this.size[0], this.size[1]])[1]]);
+                        if (app.canvas) app.canvas.setDirty(true, true);
+                    } catch (err) {
+                        console.error("[FreeFlow GS] Visibility update error:", err);
+                    }
                 };
 
                 // ═══════════════════════════════════════════════════════════════
                 // REGISTER CALLBACKS
                 // ═══════════════════════════════════════════════════════════════
-                
+
                 if (engineWidget) {
                     engineWidget.callback = () => updateVisibility();
                 }
@@ -264,7 +297,7 @@ app.registerExtension({
     // ═══════════════════════════════════════════════════════════════
     // PREVIEW IMAGE DISPLAY
     // ═══════════════════════════════════════════════════════════════
-    
+
     setup() {
         // Global listener for preview updates
         api.addEventListener("freeflow_preview", (event) => {

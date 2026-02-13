@@ -197,74 +197,70 @@ class SplatfactoEngine(IGSEngine):
         experiment_name = params.get('experiment_name', 'freeflow_frame')
         viewer_port = params.get('viewer_port', 7007)
         
+        # Determine if we're doing cross-frame warm start (checkpoint loading)
+        nerfstudio_checkpoint_dir = params.get('nerfstudio_checkpoint_dir')
+        use_checkpoint_warmstart = (nerfstudio_checkpoint_dir and 
+                                     Path(nerfstudio_checkpoint_dir).is_dir())
+        
+        # Always use wrapper for PyTorch 2.6 save_checkpoint fix.
+        # When warm starting, wrapper also seeds points3D.txt from checkpoint
+        # (so Gaussian count matches) and loads model weights post-setup.
+        wrapper_script = Path(__file__).parent / "ns_train_wrapper.py"
         cmd = [
-            str(ns_train),
-            variant,
+            str(venv_python),
+            str(wrapper_script),
         ]
+        if use_checkpoint_warmstart:
+            cmd.extend(["--ff-load-weights", str(nerfstudio_checkpoint_dir)])
+            print(f"[SplatfactoEngine] Warm start: seeding from checkpoint {nerfstudio_checkpoint_dir}")
+        cmd.append(variant)
         
         # --- MODEL PARAMETERS (must come before data paths) ---
+        # Note: Only pass parameters that exist in all nerfstudio versions.
+        # max_gs_num was added in newer versions (MCMC support) — pass conditionally.
         cmd.extend([
             f"--pipeline.model.sh_degree={params.get('sh_degree', 3)}",
-            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.1)}",
-            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0008)}",
+            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.3)}",
+            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0015)}",
             f"--pipeline.model.use_scale_regularization={bool_str(params.get('use_scale_regularization', True))}",
-            # New advanced parameters
-            f"--pipeline.model.max_gs_num={params.get('max_gs_num', 1000000)}",
-            f"--pipeline.model.refine_every={params.get('refine_every', 100)}",
-            f"--pipeline.model.warmup_length={params.get('warmup_length', 500)}",
+            f"--pipeline.model.refine_every={params.get('refine_every', 150)}",
+            f"--pipeline.model.warmup_length={params.get('warmup_length', 1000)}",
             f"--pipeline.model.num_downscales={params.get('num_downscales', 2)}",
             f"--pipeline.model.cull_screen_size={params.get('cull_screen_size', 0.15)}",
             f"--pipeline.model.split_screen_size={params.get('split_screen_size', 0.05)}",
             f"--pipeline.model.sh_degree_interval={params.get('sh_degree_interval', 1000)}",
-            f"--pipeline.model.background_color={params.get('background_color', 'random')}",
+            f"--pipeline.model.background_color={params.get('background_color', 'black')}",
         ])
         
         # --- FIXED TOPOLOGY MODE ---
-        # Note: continue_cull_post_densification flag removed - not available in nerfstudio 1.0-1.1.5
-        # stop_split_at=0 and refine_every=999999 are sufficient to lock topology
-        if not params.get('continue_cull_post_densification', True):
+        is_fixed_topology = not params.get('continue_cull_post_densification', True)
+        if is_fixed_topology:
             cmd.extend([
                 "--pipeline.model.stop_split_at=0",
                 "--pipeline.model.refine_every=999999",
             ])
-            print(f"[SplatfactoEngine] Fixed topology: splitting stopped, refinement disabled")
-        
-        # --- WARM START (checkpoint loading) ---
-        nerfstudio_checkpoint_dir = params.get('nerfstudio_checkpoint_dir')
-        if nerfstudio_checkpoint_dir and Path(nerfstudio_checkpoint_dir).is_dir():
-            cmd.extend(["--load-dir", str(nerfstudio_checkpoint_dir)])
-            print(f"[SplatfactoEngine] Warm start from checkpoint: {nerfstudio_checkpoint_dir}")
-        elif prev_ply_path and Path(prev_ply_path).exists():
-            print(f"[SplatfactoEngine] Using points3D.txt seeding for initialization")
+            print(f"[SplatfactoEngine] Fixed topology: splitting and refinement disabled")
         
         # --- VISUALIZATION (only if not Off) ---
         visualize_mode = params.get('visualize_training', 'Off')
-        is_first_frame = params.get('frame_idx', 0) == 0
-        
         if visualize_mode != "Off":
             cmd.extend([
                 "--vis", "viewer",
                 f"--viewer.websocket-port={viewer_port}",
                 "--viewer.quit-on-train-completion=True",
             ])
+            print(f"[SplatfactoEngine] Viser viewer at http://localhost:{viewer_port}")
             
-            if is_first_frame:
-                # First frame: Start new viewer and open browser
-                print(f"[SplatfactoEngine] Starting Viser viewer at http://localhost:{viewer_port}")
-                
-                # Auto-open browser ONCE on first frame only
-                if not self._browser_opened:
-                    self._browser_opened = True
-                    def open_viewer_browser(port):
-                        time.sleep(5)
-                        import webbrowser
-                        webbrowser.open(f"http://localhost:{port}")
-                        print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
-                    browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
-                    browser_thread.start()
-            else:
-                # Subsequent frames: Connect to existing viewer
-                print(f"[SplatfactoEngine] Connecting to existing viewer at http://localhost:{viewer_port}")
+            # Auto-open browser ONCE on first frame only
+            if not self._browser_opened:
+                self._browser_opened = True
+                def open_viewer_browser(port):
+                    time.sleep(5)
+                    import webbrowser
+                    webbrowser.open(f"http://localhost:{port}")
+                    print(f"[SplatfactoEngine] Opened browser to http://localhost:{port}")
+                browser_thread = threading.Thread(target=open_viewer_browser, args=(viewer_port,), daemon=True)
+                browser_thread.start()
         
         # --- LOGGING ---
         cmd.extend(["--experiment-name", experiment_name])
@@ -273,7 +269,9 @@ class SplatfactoEngine(IGSEngine):
         cmd.extend([
             "--max-num-iterations", str(iterations),
             "--machine.device-type", device_type,
-            "--steps-per-eval-all-images", "0",  # Prevent slowdown at end
+            "--steps-per-eval-all-images", "0",  # Disable full-dataset eval (extremely slow)
+            "--steps-per-eval-image", "0",        # Disable per-image eval renders
+            "--steps-per-eval-batch", "0",         # Disable batch eval
         ])
         
         # --- DATA PATHS ---
@@ -443,7 +441,7 @@ class SplatfactoEngine(IGSEngine):
                 while process.poll() is None:
                     # Check for training completion (Viser keeps process alive)
                     if progress_info.get('training_complete'):
-                        time.sleep(3)  # Grace period for checkpoint save
+                        time.sleep(5)  # Grace period for checkpoint save
                         if process.poll() is None:
                             print("[SplatfactoEngine] Training complete, terminating process...")
                             process.terminate()
@@ -486,17 +484,28 @@ class SplatfactoEngine(IGSEngine):
                 print("[SplatfactoEngine] Error: Could not find config.yml after training")
                 return False
             
-            # Export PLY
-            export_success = self._export_ply(config_path, output_path)
-            if not export_success:
-                print("[SplatfactoEngine] Error: PLY export failed")
-                return False
-            
             # Store checkpoint dir for warm start on next frame
             checkpoint_dir = self.get_checkpoint_path(nerfstudio_output_dir, experiment_name)
             if checkpoint_dir:
                 self.last_checkpoint_dir = checkpoint_dir
                 print(f"[SplatfactoEngine] Checkpoint saved for warm start: {checkpoint_dir}")
+
+            # Export PLY
+            # In Fixed Topology mode, use checkpoint-direct export first to preserve
+            # exact Gaussian count (ns-export filters low-opacity/invalid gaussians).
+            export_success = False
+            if is_fixed_topology and checkpoint_dir:
+                print("[SplatfactoEngine] Fixed topology export: using checkpoint-direct path (constant count)")
+                export_success = self._export_ply_from_checkpoint(checkpoint_dir, output_path)
+                if not export_success:
+                    print("[SplatfactoEngine] Fixed export failed; falling back to ns-export")
+
+            if not export_success:
+                export_success = self._export_ply(config_path, output_path)
+
+            if not export_success:
+                print("[SplatfactoEngine] Error: PLY export failed")
+                return False
             
             print(f"[SplatfactoEngine] Success! PLY exported to {output_path}")
             return True
@@ -527,7 +536,146 @@ class SplatfactoEngine(IGSEngine):
             return configs[0]
         
         return None
-    
+
+    def _export_ply_from_checkpoint(self, checkpoint_dir: Path, output_path: Path) -> bool:
+        """
+        Export PLY directly from latest checkpoint tensors.
+
+        This path preserves exact Gaussian count (no opacity/NaN filtering),
+        which is required for Fixed Topology smoothing workflows.
+        """
+        try:
+            import numpy as np
+            import torch
+
+            checkpoint_dir = Path(checkpoint_dir)
+            output_path = Path(output_path)
+
+            ckpt_files = sorted(checkpoint_dir.glob("step-*.ckpt"))
+            if not ckpt_files:
+                print(f"[SplatfactoEngine] Direct export failed: no checkpoint in {checkpoint_dir}")
+                return False
+
+            ckpt_path = ckpt_files[-1]
+            print(f"[SplatfactoEngine] Direct export from checkpoint: {ckpt_path.name}")
+
+            loaded = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            pipeline_state = loaded.get("pipeline", {})
+
+            def find_tensor(*suffixes):
+                for key, value in pipeline_state.items():
+                    clean_key = key.replace("module.", "", 1) if key.startswith("module.") else key
+                    if any(clean_key.endswith(suffix) for suffix in suffixes):
+                        return value
+                return None
+
+            means_t = find_tensor("_model.gauss_params.means", "model.gauss_params.means", "_model.means", "model.means")
+            scales_t = find_tensor("_model.gauss_params.scales", "model.gauss_params.scales", "_model.scales", "model.scales")
+            quats_t = find_tensor("_model.gauss_params.quats", "model.gauss_params.quats", "_model.quats", "model.quats")
+            opacities_t = find_tensor("_model.gauss_params.opacities", "model.gauss_params.opacities", "_model.opacities", "model.opacities")
+            features_dc_t = find_tensor("_model.gauss_params.features_dc", "model.gauss_params.features_dc", "_model.features_dc", "model.features_dc")
+            features_rest_t = find_tensor("_model.gauss_params.features_rest", "model.gauss_params.features_rest", "_model.features_rest", "model.features_rest")
+
+            required = {
+                "means": means_t,
+                "scales": scales_t,
+                "quats": quats_t,
+                "opacities": opacities_t,
+                "features_dc": features_dc_t,
+                "features_rest": features_rest_t,
+            }
+            missing = [name for name, tensor in required.items() if tensor is None]
+            if missing:
+                print(f"[SplatfactoEngine] Direct export failed: missing tensors {missing}")
+                return False
+
+            means = means_t.detach().cpu().float().numpy()
+            scales = scales_t.detach().cpu().float().numpy()
+            quats = quats_t.detach().cpu().float().numpy()
+            opacities = opacities_t.detach().cpu().float().numpy().reshape(-1)
+            features_dc = features_dc_t.detach().cpu().float().numpy()
+            features_rest = features_rest_t.detach().cpu().float().numpy()
+
+            if features_dc.ndim == 3 and features_dc.shape[1] == 1:
+                features_dc = features_dc.squeeze(1)
+            if features_dc.ndim != 2:
+                print(f"[SplatfactoEngine] Direct export failed: unexpected features_dc shape {features_dc.shape}")
+                return False
+
+            if features_rest.ndim == 3:
+                # Match nerfstudio exporter ordering: transpose(1,2).reshape(N,-1)
+                if features_rest.shape[2] == 3:
+                    features_rest_flat = np.transpose(features_rest, (0, 2, 1)).reshape(features_rest.shape[0], -1)
+                elif features_rest.shape[1] == 3:
+                    features_rest_flat = features_rest.reshape(features_rest.shape[0], -1)
+                else:
+                    print(f"[SplatfactoEngine] Direct export failed: unexpected features_rest shape {features_rest.shape}")
+                    return False
+            elif features_rest.ndim == 2:
+                features_rest_flat = features_rest
+            else:
+                print(f"[SplatfactoEngine] Direct export failed: unexpected features_rest rank {features_rest.ndim}")
+                return False
+
+            n = int(means.shape[0])
+            if n == 0:
+                print("[SplatfactoEngine] Direct export failed: zero gaussians")
+                return False
+
+            if scales.shape[0] != n or quats.shape[0] != n or opacities.shape[0] != n:
+                print(
+                    "[SplatfactoEngine] Direct export failed: tensor count mismatch "
+                    f"means={n}, scales={scales.shape[0]}, quats={quats.shape[0]}, opacities={opacities.shape[0]}"
+                )
+                return False
+
+            def sanitize_1d(arr):
+                arr = np.asarray(arr, dtype=np.float32).reshape(n)
+                return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+            fields = []
+            fields.append(("x", sanitize_1d(means[:, 0])))
+            fields.append(("y", sanitize_1d(means[:, 1])))
+            fields.append(("z", sanitize_1d(means[:, 2])))
+            fields.append(("nx", np.zeros(n, dtype=np.float32)))
+            fields.append(("ny", np.zeros(n, dtype=np.float32)))
+            fields.append(("nz", np.zeros(n, dtype=np.float32)))
+
+            for i in range(features_dc.shape[1]):
+                fields.append((f"f_dc_{i}", sanitize_1d(features_dc[:, i])))
+
+            for i in range(features_rest_flat.shape[1]):
+                fields.append((f"f_rest_{i}", sanitize_1d(features_rest_flat[:, i])))
+
+            fields.append(("opacity", sanitize_1d(opacities)))
+            for i in range(min(3, scales.shape[1])):
+                fields.append((f"scale_{i}", sanitize_1d(scales[:, i])))
+            for i in range(min(4, quats.shape[1])):
+                fields.append((f"rot_{i}", sanitize_1d(quats[:, i])))
+
+            dtype = [(name, "<f4") for name, _ in fields]
+            vertices = np.empty(n, dtype=dtype)
+            for name, values in fields:
+                vertices[name] = values
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "wb") as f:
+                f.write(b"ply\n")
+                f.write(b"format binary_little_endian 1.0\n")
+                f.write(b"comment Generated by FreeFlow checkpoint-direct export\n")
+                f.write(b"comment Vertical Axis: z\n")
+                f.write(f"element vertex {n}\n".encode("ascii"))
+                for name, _ in fields:
+                    f.write(f"property float {name}\n".encode("ascii"))
+                f.write(b"end_header\n")
+                vertices.tofile(f)
+
+            print(f"[SplatfactoEngine] Direct export wrote {n} gaussians (unfiltered): {output_path}")
+            return output_path.exists()
+        except Exception as e:
+            print(f"[SplatfactoEngine] Direct checkpoint export error: {e}")
+            return False
+
     def _export_ply(self, config_path: Path, output_path: Path) -> bool:
         """
         Export trained model to PLY format using ns-export.
