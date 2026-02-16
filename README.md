@@ -1,91 +1,230 @@
-# ComfyUI-FreeFlowGS: 4D Gaussian Splatting
+# ComfyUI-FreeFlowGS
 
-**High-Fidelity 4D Gaussian Splatting Suite for ComfyUI**
+Production-focused 4D Gaussian Splatting tools for ComfyUI.
 
-ComfyUI-FreeFlowGS is a custom node suite designed to facilitate the reconstruction of 4D Gaussian Splats from multi-view video footage directly within ComfyUI. 
+FreeFlowGS is a multi-camera, sequential warm-start pipeline designed for temporally stable splat sequences. It supports multiple training backends and includes fixed-topology workflows for downstream smoothing, interpolation, and editorial use.
 
-Designed for technical artists and researchers, this suite implements a sequential "warm-start" pipeline that prioritizes temporal consistency. The system is built upon the **Brush (WebGPU)** and **COLMAP** engines, offering native cross-platform support for **Windows (CUDA)**, **macOS (Metal)**, and **Linux (Vulkan)**.
+## What It Delivers
 
-## 🔬 Core Methodology
+- Frame-to-frame warm start with backend-specific initialization
+- Fixed-topology mode for stable point count and order
+- Dynamic mode for unconstrained growth/adaptation
+- Distributed anchor workflow across multiple machines
+- Motion-aware masking for temporal stability
+- Realign/smooth post-process outputs in separate folders
 
-Standard 4D reconstruction often treats video frames as independent solved states, leading to inconsistent point counts and visual jitter. FreeFlowGS addresses this through three specific modes:
+## Core Method (Temporal Prediction, Compression-Inspired)
 
-- **Cinema Mode (Fixed Topology)**: Locks the point cloud structure after the initial frame. By solving the geometry on Frame 0 and restricting point birth/death in subsequent frames, the system treats the splats as a deformable mesh. This ensures consistent point indices across the timeline, significantly reducing high-frequency flickering.
-- **Adaptive Sequential Flow**: Implements a warm-start logic where Frame $N$ initializes Frame $N+1$. This maintains the stability of static elements (backgrounds) while allowing the optimizer to focus gradients on moving areas.
-- **Hybrid 3D-4D Separation**: Capable of isolating the static background (solved once) from the dynamic foreground.
+FreeFlowGS uses a temporal strategy inspired by prediction ideas common in video compression:
 
-## 🚀 Installation
+- A strong reference state (anchor frame)
+- Predictive continuation to subsequent frames (warm start)
+- Motion-aware update gating (masking)
 
-1.  **Clone the Repository**:
-    Navigate to your ComfyUI `custom_nodes` directory and run:
-    ```bash
-    git clone https://github.com/FreeFlowVFX/ComfyUi-FreeFlowGS.git
-    ```
+This is a conceptual analogy to I/P-frame style thinking, not an implementation of AVC/HEVC algorithms (no block residual coding, quantization, or entropy coding). The practical goal is similar: preserve stable regions and spend optimization where motion actually exists.
 
-2.  **Install Python Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+## Backend Matrix
 
-3.  **Binaries**: 
-    The nodes will attempt to auto-install dependencies (Brush, FFmpeg) on first run. 
-    *Note: macOS users should install COLMAP via `brew install colmap`.*
+| Backend | Label in UI | Best Use | Platform Reality | Notes |
+|---|---|---|---|---|
+| Brush | `Brush` | Fast iteration and broad support | Windows, macOS, Linux | Uses PLY -> points warm start |
+| Splatfacto (Nerfstudio) | `Splatfacto (Pro)` | Highest controllability and quality | CUDA/NVIDIA only | Full checkpoint warm start (all Gaussian attributes) |
+| OpenSplat | `OpenSplat (Mac/CPU)` | CPU/OpenCL fallback path | macOS/CPU-friendly path | Shared-parameter path, simpler setup |
 
----
+Notes:
+- Splatfacto depends on `gsplat`, which currently requires CUDA. In practice this means **no native Splatfacto training on macOS**.
+- The node UI hides unavailable backends by platform/capability checks.
 
-## 📚 Node Reference & Usage
+## ⚙️ Installation
 
-### 🎥 FreeFlow Multi-Camera Loader
-Scans a directory for subfolders containing image sequences. It automatically detects valid camera folders and synchronizes frames.
-- **Input**: `directory_path` (Absolute path to root capture folder)
-- **Output**: `MULTICAM_DICT` (Dictionary of camera names to image paths)
+1. Clone into ComfyUI custom nodes:
 
-### ⚓ FreeFlow COLMAP Anchor
-Runs Structure-from-Motion (SfM) on Frame 0 to create a sparse point cloud. This "anchor" ensures all subsequent frames share a common coordinate system and scale.
-- **Parameters**: 
-  - `quality`: Preset (Low/Medium/High/Extreme).
-  - `camera_model`: `OPENCV` (standard) or `PINHOLE`.
-  - `frame_selection`: Supports range (`0-10`), list (`1,5`), or wildcard (`all`, `*`).
-  - `matching_method`: `Exhaustive` (Accurate), `Sequential` (Fast for video), `VocabTree` (Fast for large datasets).
+```bash
+git clone https://github.com/FreeFlowVFX/ComfyUi-FreeFlowGS.git
+```
 
-### 🧠 FreeFlow 4D Adaptive Engine
-The core training node that evolves the Gaussian Splats over time using the input video feed and the COLMAP anchor.
-- **Inputs**: `multicam_feed`, `colmap_anchor`
-- **Key Parameters**:
-  - `topology_mode`:
-    - **Fixed (Cinema-Smooth)**: Locks topology after Frame 0. Essential for smooth video.
-    - **Dynamic (Default-Flicker)**: Adds/removes points every frame.
-  - `visualize_training`: Spawns a native window or saves preview images to `output/` to monitor progress.
-  - `init_from_sparse`: Initializes Frame 0 from the COLMAP point cloud.
+2. Install Python dependencies:
 
-### 📺 FreeFlow Smart Grid Monitor
-Creates a professional "Video Wall" grid of all camera feeds to verify synchronization.
-- **Inputs**: `multicam_feed`
-- **Parameters**: `grid_resolution`, `cam_filter`, `show_labels`.
+```bash
+pip install -r requirements.txt
+```
 
-### 🌊 FreeFlow Post-Process Smoother
-Applies temporal smoothing (Savitzky-Golay filter) to an existing `.ply` sequence to further reduce high-frequency jitter.
-- **Inputs**: `ply_sequence`
-- **Parameters**: `window_size`, `poly_order`.
+3. First run (ComfyUI auto-install flow):
+- FreeFlow performs dependency checks and attempts auto-install for supported components when the nodes initialize.
+- This includes Nerfstudio environment setup where supported and backend-specific dependencies.
+- On macOS, install COLMAP manually if needed:
 
-### 📂 FreeFlow PLY Sequence Loader
-Loads a sequence of `.ply` files for playback or post-processing.
-- **Parameters**: `directory_path`, `frame_range`.
+```bash
+brew install colmap
+```
 
-### 🧊 FreeFlow COLMAP Visualizer
-Visualizes the sparse point cloud and camera positions in 3D space directly in the ComfyUI browser.
-- **Inputs**: `colmap_data`
+### Windows note (Splatfacto)
 
-### 🎮 FreeFlow Interactive Player
-Web-based 3D player with depth sorting and camera controls to view the resulting 4D splats.
+- For Windows CUDA setups, the project supports pre-built `gsplat` wheel installation during Nerfstudio setup to avoid local compiler friction.
+- This improves first-run reliability for `Splatfacto (Pro)` on Windows.
 
----
+## 🎬 Recommended Production Workflow
+
+### Single Machine (Fixed Topology)
+
+1. Build COLMAP anchor
+2. Run `FreeFlow GS Engine (4D)` with:
+   - `topology_mode = Fixed (Stable)`
+   - optional `initial_iterations_override` + `initial_quality_preset`
+3. Optional postprocess:
+   - `realigned/` for topology alignment output
+   - `smoothed/` for temporal smoothing output
+
+### Multi-Machine (Distributed)
+
+One machine acts as producer, others as consumers.
+
+- Producer:
+  - `distributed_anchor = true`
+  - choose `distributed_anchor_frame`
+  - writes `Distributed_Anchor/anchor_frame_XXXX.*`
+
+- Consumers:
+  - same shared output root
+  - same `distributed_anchor_frame`
+  - start from distributed anchor source automatically
+
+Splatfacto uses checkpoint-handoff semantics for distributed continuity; Brush/OpenSplat use anchor PLY handoff.
+
+## 🧠 GS Engine: Key Behaviors
+
+### Fixed Topology
+
+- Topology is locked after initialization phase
+- Designed for temporal consistency and post smoothing
+- Splatfacto fixed export uses checkpoint-direct path to preserve point count consistency
+
+### Warm Start
+
+- Brush/OpenSplat: prior PLY converted to points for next frame initialization
+- Splatfacto: previous checkpoint injected (full attribute warm start), with optimizer/callback rebind safety
+
+### Warmup Frames
+
+`warmup_frames` is pre-roll before selected range.
+
+- It uses frames before your first selected frame if they exist
+- It does not consume your selected main range
+- Anchor frame is never treated as warmup
+
+## 🛰️ Masking: Why It Exists and How It Works
+
+Temporal drift often appears when static regions continue receiving unnecessary updates. Masking reduces that by focusing updates on moving content.
+
+### Parameters
+
+- `masking_method`: `None`, `Optical Flow (Robust)`, `Simple Diff (Fast)`
+- `motion_sensitivity`: 0.0 to 1.0, step 0.001 (3-decimal precision)
+  - Higher values detect subtler motion (larger moving region)
+  - For "exclude only fully static", start around `0.80-0.90`
+
+### Splatfacto Mask Modes
+
+- `Mask Only (Current)`
+  - Writes `masks/` in frame work dir
+  - Uses nerfstudio `--masks-path`
+
+- `Blend Static From Previous (Recommended)`
+  - Still computes optical-flow masks
+  - Applies masks directly to create blended training images
+  - No `masks/` folder is expected in this mode
+  - Useful for reducing visible seam artifacts in static zones
+
+### Debug Outputs
+
+Enable `save_mask_debug_images` (Splatfacto) to write inspection artifacts to:
+
+`output/MaskDebug/<frame_xxxx_work>/`
+
+Includes mask snapshots and, in blend mode, current/previous/blended image outputs.
+
+## 🧬 FLAME Integration Status (In Progress)
+
+FreeFlow includes a `FreeFlow FlameTracker` node and mesh-guidance hooks, but the full FLAME-driven "stable underlying mesh driver" workflow is still in progress.
+
+Current status:
+
+- `FreeFlow FlameTracker` supports:
+  - `MediaPipe-3D (Fast-Robust)`
+  - `FLAME-Fit (Pro-Experimental)`
+- `FreeFlow GS Engine (4D)` accepts optional `guidance_mesh` input for mesh-guided initialization.
+
+Roadmap direction:
+
+- strengthen FLAME-guided temporal consistency in fixed-topology runs
+- improve mesh-to-splat coupling for cleaner long-shot stability
+- keep guidance optional so non-FLAME workflows remain simple and fast
+
+In short: FLAME integration is real and usable for experiments today, with ongoing work to make it a robust production mesh driver.
+
+## 📁 Output Layout
+
+Typical output structure:
+
+```text
+<output_root>/
+  <prefix>_frame_XXXX.ply
+  Distributed_Anchor/
+    anchor_frame_XXXX.ply
+    anchor_frame_XXXX.json
+  MaskDebug/
+    frame_XXXX_work/
+      *_mask.png
+      *_current.png
+      *_previous.png
+      *_blended.png
+  realigned/
+    <prefix>_frame_XXXX.ply
+  smoothed/
+    <prefix>_frame_XXXX.ply
+```
+
+## 🧩 Node Inventory
+
+- FreeFlow Multi-Camera Loader
+- FreeFlow COLMAP Anchor
+- FreeFlow GS Engine (4D) [primary production node]
+- FreeFlow 4D Adaptive Engine [compatibility/alternative path]
+- FreeFlow Smart Grid Monitor
+- FreeFlow Post-Process Smoother
+- FreeFlow PLY Sequence Loader
+- FreeFlow 3D Visualizer / COLMAP Visualizers
+- FreeFlow 4D Player
+- FreeFlow FlameTracker (FLAME path is experimental/in-progress)
+- FreeFlow Mesh Loader
 
 ## 🛠️ Troubleshooting
 
-- **Flickering**: Ensure `topology_mode` is set to `Fixed (Cinema-Smooth)`. Dynamic topology inherently causes popping artifacts.
-- **Training Stuck**: If using "Spawn Native GUI", close the Brush window to resume process, or switch to "Save Preview Images".
-- **Missing Binaries**: Check the ComfyUI console logs. You may need to install `colmap` or `ffmpeg` manually if auto-install fails.
+- Workflow load error like `topo.includes is not a function`
+  - Pull latest updates and reload browser; compatibility guards were added for legacy widget values.
+
+- No `masks/` folder in Splatfacto blend mode
+  - Expected. Blend mode uses computed masks internally and trains on blended images.
+
+- Static regions still unstable
+  - Use `Optical Flow (Robust)`
+  - Raise `motion_sensitivity` toward `0.85-0.90`
+  - Use `Blend Static From Previous (Recommended)`
+  - Enable `save_mask_debug_images` and inspect coverage
+
+- Splatfacto missing on macOS
+  - Expected today: Splatfacto requires CUDA/gsplat.
+  - Use Brush or OpenSplat on macOS, or run Splatfacto on a Windows/Linux CUDA machine.
+
+- Preview controls not visible
+  - `preview_interval`, `preview_camera_filter`, `eval_camera_index` appear only in `Save Preview Images` mode.
+
+## 📚 References
+
+- ITU-T H.264/AVC (motion-compensated prediction concepts): https://www.itu.int/rec/T-REC-H.264
+- ITU-T H.265/HEVC (temporal prediction concepts): https://www.itu.int/rec/T-REC-H.265
+- Farneback optical flow (conceptual basis for robust motion estimation in this pipeline)
 
 ## License
+
 GNU General Public License v3.0
