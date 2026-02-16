@@ -132,6 +132,13 @@ app.registerExtension({
                     return !!v;
                 };
 
+                const normalizeEngineLabel = (v) => {
+                    const s = asStr(v, "Brush");
+                    // Backward compatibility with older saved workflows
+                    if (s === "Brush (Fast)") return "Brush";
+                    return s;
+                };
+
                 // Smart restoration for version mismatches
                 const onConfigure = this.onConfigure;
                 this.onConfigure = function (o) {
@@ -146,7 +153,7 @@ app.registerExtension({
                         const currentVals = {};
 
                         // Defaults
-                        currentVals["engine_backend"] = "Brush (Fast)";
+                        currentVals["engine_backend"] = "Brush";
                         currentVals["visualize_training"] = "Off";
                         currentVals["topology_mode"] = "Dynamic (Default-Flicker)";
                         currentVals["distributed_anchor"] = false;
@@ -154,7 +161,7 @@ app.registerExtension({
                         currentVals["splatfacto_mask_mode"] = "Blend Static From Previous (Recommended)";
 
                         for (const w of this._freeflow_all_widgets) {
-                            const engine = asStr(currentVals["engine_backend"]);
+                            const engine = normalizeEngineLabel(currentVals["engine_backend"]);
                             const isBrush = engine && engine.includes("Brush");
                             const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
                             const viz = asStr(currentVals["visualize_training"], "Off");
@@ -189,6 +196,9 @@ app.registerExtension({
                                 let val = saved[savedIdx++];
                                 if (["engine_backend", "visualize_training", "topology_mode", "masking_method", "splatfacto_mask_mode"].includes(w.name)) {
                                     val = asStr(val, asStr(w.value));
+                                    if (w.name === "engine_backend") {
+                                        val = normalizeEngineLabel(val);
+                                    }
                                 } else if (w.name === "distributed_anchor") {
                                     val = asBool(val);
                                 }
@@ -223,7 +233,10 @@ app.registerExtension({
 
                 const updateVisibility = () => {
                     try {
-                        const engine = asStr(engineWidget ? engineWidget.value : "Brush (Fast)", "Brush (Fast)");
+                        let engine = normalizeEngineLabel(engineWidget ? engineWidget.value : "Brush");
+                        if (engineWidget && engineWidget.value !== engine) {
+                            engineWidget.value = engine;
+                        }
                         const isBrush = engine && engine.includes("Brush");
                         const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
                         const isOpenSplat = engine && engine.includes("OpenSplat");

@@ -3,7 +3,7 @@ FreeFlow_GS_Engine - 4D Quality Training Node
 Extends AdaptiveEngine with Rig-Guided Warm Start functionality.
 
 Supports multiple backends:
-- Brush (Fast): ArthurBrussee/brush - Single binary, fast training
+- Brush: ArthurBrussee/brush - Single binary trainer
 - Splatfacto (Pro): Nerfstudio Splatfacto - Production quality, rich features
 """
 
@@ -71,7 +71,7 @@ class FreeFlow_GS_Engine:
     def INPUT_TYPES(s):
         # Build engine options based on platform capabilities
         # Only show engines that can actually work on the current system
-        engine_options = ["Brush (Fast)"]  # Brush is always available (bundled binary for all platforms)
+        engine_options = ["Brush"]  # Brush is always available (bundled binary for all platforms)
         
         # Splatfacto requires CUDA - only show if platform supports it
         if SPLATFACTO_AVAILABLE:
@@ -111,7 +111,7 @@ class FreeFlow_GS_Engine:
                 # ENGINE SELECTION
                 # ═══════════════════════════════════════════════════════════════
                 "engine_backend": (engine_options, {
-                    "default": "Brush (Fast)",
+                    "default": "Brush",
                     "tooltip": " ".join(tooltip_parts)
                 }),
 
@@ -239,7 +239,7 @@ class FreeFlow_GS_Engine:
                 }),
                 "splatfacto_mask_mode": (["Mask Only (Current)", "Blend Static From Previous (Recommended)"], {
                     "default": "Blend Static From Previous (Recommended)",
-                    "tooltip": "[Splatfacto] Mask behavior for moving regions. Mask Only: sends binary masks to nerfstudio (current behavior). Blend Static From Previous: composites static (black-mask) pixels from previous frame before training, which reduces seam artifacts while preserving fixed-mode point count/order."
+                    "tooltip": "[Splatfacto] Mask behavior for moving regions. Mask Only: writes masks/ folder and uses nerfstudio --masks-path. Blend Static From Previous: still computes optical-flow masks, but applies them directly to build blended training images (no masks/ folder), which reduces seam artifacts while preserving fixed-mode point count/order."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -1335,7 +1335,7 @@ class FreeFlow_GS_Engine:
     # ==================================================================================
 
     def execute_training_pipeline(self, multicam_feed, colmap_anchor, 
-                               engine_backend="Brush (Fast)",
+                               engine_backend="Brush",
                                guidance_mesh=None, topology_mode="Dynamic (Default-Flicker)",
                                apply_smoothing=False, realign_topology=True,
                                visualize_training="Off", preview_interval=500, eval_camera_index=10,
