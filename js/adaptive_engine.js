@@ -40,6 +40,21 @@ app.registerExtension({
                     }
                 };
 
+                // Safe normalization for old workflows where combo values can be numeric
+                const asStr = (v, fallback = "") => {
+                    if (v === undefined || v === null) return fallback;
+                    return String(v);
+                };
+                const asBool = (v) => {
+                    if (typeof v === "boolean") return v;
+                    if (typeof v === "number") return v !== 0;
+                    if (typeof v === "string") {
+                        const s = v.trim().toLowerCase();
+                        return s === "true" || s === "1" || s === "yes";
+                    }
+                    return !!v;
+                };
+
                 // Smart Restoration for Truncated Saves
                 const onConfigure = this.onConfigure;
                 this.onConfigure = function (o) {
@@ -60,29 +75,35 @@ app.registerExtension({
 
                         for (const w of this._freeflow_all_widgets) {
                             // Standard Visibility Logic (Must match updateVisibility)
-                            const viz = currentVals["visualize_training"];
-                            const topo = currentVals["topology_mode"];
-                            const dist = currentVals["distributed_anchor"];
+                            const viz = asStr(currentVals["visualize_training"], "Off");
+                            const topo = asStr(currentVals["topology_mode"]);
+                            const dist = asBool(currentVals["distributed_anchor"]);
+                            const maskingMode = asStr(currentVals["masking_method"], "None (No Masking)");
 
                             let visible = true;
                             if (w.name === "preview_interval" || w.name === "preview_camera_filter" || w.name === "eval_camera_index") {
                                 visible = (viz === "Save Preview Images");
                             } else if (w.name === "motion_sensitivity") {
-                                visible = (currentVals["masking_method"] !== "None (No Masking)");
+                                visible = (maskingMode !== "None (No Masking)");
                             } else if (w.name === "apply_smoothing") {
-                                visible = (topo && topo.includes("Fixed"));
+                                visible = topo.includes("Fixed");
                             } else if (w.name === "distributed_anchor_path" || w.name === "distributed_anchor_frame" || w.name === "warmup_frames") {
                                 visible = dist;
                             }
 
                             if (visible && savedIdx < saved.length) {
-                                const val = saved[savedIdx++];
+                                let val = saved[savedIdx++];
+                                if (["visualize_training", "topology_mode", "masking_method"].includes(w.name)) {
+                                    val = asStr(val, asStr(w.value));
+                                } else if (w.name === "distributed_anchor") {
+                                    val = asBool(val);
+                                }
                                 w.value = val;
                                 currentVals[w.name] = val;
                                 full.push(val);
                             } else {
                                 full.push(w.value);
-                                currentVals[w.name] = w.value;
+                                currentVals[w.name] = (w.name === "distributed_anchor") ? asBool(w.value) : w.value;
                             }
                         }
 
@@ -93,18 +114,18 @@ app.registerExtension({
                 // Callback to toggle visibility
                 const updateVisibility = () => {
                     // 1. Preview Controls Visibility
-                    const mode = vizWidget.value;
+                    const mode = asStr(vizWidget ? vizWidget.value : "Off", "Off");
                     const showPreviewControls = (mode === "Save Preview Images");
 
                     // 2. Smoothing Controls Visibility
-                    const topo = topoWidget ? topoWidget.value : "";
-                    const showSmoothing = (topo && topo.includes("Fixed"));
+                    const topo = asStr(topoWidget ? topoWidget.value : "");
+                    const showSmoothing = topo.includes("Fixed");
 
                     // 3. Distributed Controls Visibility
-                    const showDistributed = createAnchorWidget ? createAnchorWidget.value : false;
+                    const showDistributed = asBool(createAnchorWidget ? createAnchorWidget.value : false);
 
                     // 4. Masking sensitivity visibility
-                    const maskingMode = maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)";
+                    const maskingMode = asStr(maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)", "None (No Masking)");
                     const showMotionSensitivity = (maskingMode !== "None (No Masking)");
 
                     // Filter widgets based on conditions

@@ -116,6 +116,22 @@ app.registerExtension({
                     }
                 };
 
+                // Safe value normalization for old workflows where combo values
+                // may be stored as numeric indices instead of strings.
+                const asStr = (v, fallback = "") => {
+                    if (v === undefined || v === null) return fallback;
+                    return String(v);
+                };
+                const asBool = (v) => {
+                    if (typeof v === "boolean") return v;
+                    if (typeof v === "number") return v !== 0;
+                    if (typeof v === "string") {
+                        const s = v.trim().toLowerCase();
+                        return s === "true" || s === "1" || s === "yes";
+                    }
+                    return !!v;
+                };
+
                 // Smart restoration for version mismatches
                 const onConfigure = this.onConfigure;
                 this.onConfigure = function (o) {
@@ -138,22 +154,23 @@ app.registerExtension({
                         currentVals["splatfacto_mask_mode"] = "Blend Static From Previous (Recommended)";
 
                         for (const w of this._freeflow_all_widgets) {
-                            const engine = currentVals["engine_backend"];
+                            const engine = asStr(currentVals["engine_backend"]);
                             const isBrush = engine && engine.includes("Brush");
                             const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
-                            const viz = currentVals["visualize_training"];
-                            const topo = currentVals["topology_mode"];
-                            const dist = currentVals["distributed_anchor"];
+                            const viz = asStr(currentVals["visualize_training"], "Off");
+                            const topo = asStr(currentVals["topology_mode"]);
+                            const dist = asBool(currentVals["distributed_anchor"]);
+                            const maskingMode = asStr(currentVals["masking_method"], "None (No Masking)");
 
                             let visible = true;
                             if (w.name === "masking_method") {
                                 visible = true;
                             } else if (w.name === "motion_sensitivity") {
-                                visible = (currentVals["masking_method"] !== "None (No Masking)");
+                                visible = (maskingMode !== "None (No Masking)");
                             } else if (w.name === "splatfacto_mask_mode") {
-                                visible = isSplatfacto && (currentVals["masking_method"] !== "None (No Masking)");
+                                visible = isSplatfacto && (maskingMode !== "None (No Masking)");
                             } else if (w.name === "initial_quality_preset") {
-                                visible = (topo && topo.includes("Fixed"));
+                                visible = topo.includes("Fixed");
                             } else if (maskingParams.includes(w.name)) {
                                 visible = true;
                             } else if (brushParams.includes(w.name)) {
@@ -169,11 +186,16 @@ app.registerExtension({
                             }
 
                             if (visible && savedIdx < saved.length) {
-                                const val = saved[savedIdx++];
+                                let val = saved[savedIdx++];
+                                if (["engine_backend", "visualize_training", "topology_mode", "masking_method", "splatfacto_mask_mode"].includes(w.name)) {
+                                    val = asStr(val, asStr(w.value));
+                                } else if (w.name === "distributed_anchor") {
+                                    val = asBool(val);
+                                }
                                 w.value = val;
                                 currentVals[w.name] = val;
                             } else {
-                                currentVals[w.name] = w.value;
+                                currentVals[w.name] = (w.name === "distributed_anchor") ? asBool(w.value) : w.value;
                             }
                         }
                     }
@@ -201,7 +223,7 @@ app.registerExtension({
 
                 const updateVisibility = () => {
                     try {
-                        const engine = engineWidget ? engineWidget.value : "Brush (Fast)";
+                        const engine = asStr(engineWidget ? engineWidget.value : "Brush (Fast)", "Brush (Fast)");
                         const isBrush = engine && engine.includes("Brush");
                         const isSplatfacto = engine && (engine.includes("Splatfacto") || engine.includes("Nerfstudio"));
                         const isOpenSplat = engine && engine.includes("OpenSplat");
@@ -224,21 +246,24 @@ app.registerExtension({
                             const filtered = vizWidget._originalOptions.filter(opt => allowedOptions.includes(opt));
                             setComboOptions(vizWidget, filtered);
 
-                            if (!allowedOptions.includes(vizWidget.value)) {
+                            const currentViz = asStr(vizWidget.value, "Off");
+                            if (!allowedOptions.includes(currentViz)) {
                                 vizWidget.value = "Off";
+                            } else if (vizWidget.value !== currentViz) {
+                                vizWidget.value = currentViz;
                             }
                         }
 
-                        const vizMode = vizWidget ? vizWidget.value : "Off";
+                        const vizMode = asStr(vizWidget ? vizWidget.value : "Off", "Off");
                         const isSavePreview = (vizMode === "Save Preview Images");
 
-                        const topoMode = topoWidget ? topoWidget.value : "";
-                        const isFixedTopo = (topoMode && topoMode.includes("Fixed"));
+                        const topoMode = asStr(topoWidget ? topoWidget.value : "");
+                        const isFixedTopo = topoMode.includes("Fixed");
 
-                        const maskingMode = maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)";
+                        const maskingMode = asStr(maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)", "None (No Masking)");
                         const showMotionSensitivity = maskingMode !== "None (No Masking)";
 
-                        const showDistributed = distributedWidget ? distributedWidget.value : false;
+                        const showDistributed = asBool(distributedWidget ? distributedWidget.value : false);
 
                         // Filter widgets based on current state
                         this.widgets = allWidgets.filter(w => {
