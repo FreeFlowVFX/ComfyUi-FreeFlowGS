@@ -53,6 +53,8 @@ class FreeFlow_AdaptiveEngine:
 
                 # --- 3. Topology Control ---
                 "topology_mode": (["Dynamic (Default-Flicker)", "Fixed (Stable)"], {"default": "Dynamic (Default-Flicker)", "tooltip": "Dynamic: Points grow/shrink each frame (may flicker). Fixed: Lock point count after Frame 0 for smooth, consistent video output."}),
+                "existing_frames_policy": (["Continue (Auto-Resume)", "Overwrite (Start Fresh)"], {"default": "Continue (Auto-Resume)", "tooltip": "Behavior when frame outputs already exist. Continue resumes from the first missing frame in sequence order. Overwrite retrains from scratch."}),
+                "run_postprocess_if_no_training": ("BOOLEAN", {"default": False, "tooltip": "If auto-resume finds all selected frames already generated, run fixed-topology postprocess on existing outputs instead of exiting immediately."}),
                 "apply_smoothing": ("BOOLEAN", {"default": False, "tooltip": "Apply Savitzky-Golay temporal filter to smooth point positions across frames. Eliminates jitter. REQUIRES Fixed Topology mode."}),
                 
                 # --- 4. Core Model Parameters ---
@@ -375,6 +377,7 @@ class FreeFlow_AdaptiveEngine:
                    feature_lr=0.0025, gaussian_lr=0.007, opacity_lr=0.01, scale_loss_weight=1e-8,
                    frame_selection="all", init_from_sparse=True, masking_method="None (No Masking)", motion_sensitivity=0.85,
                    custom_output_path="", filename_prefix="FreeFlow_Splat", use_symlinks=True, cleanup_work_dirs=True,
+                   existing_frames_policy="Continue (Auto-Resume)", run_postprocess_if_no_training=False,
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
                    unique_id=None, preview_camera_filter=""):
         """
@@ -567,6 +570,7 @@ class FreeFlow_AdaptiveEngine:
             raise RuntimeError("No main frames remain after warmup pre-roll computation.")
 
         indices_to_process = warmup_pre_indices + main_processing_indices
+        full_main_processing_indices = list(main_processing_indices)
         if warmup_pre_indices:
             first_main_real = all_frame_numbers[main_processing_indices[0]]
             warmup_first_real = all_frame_numbers[warmup_pre_indices[0]]
@@ -576,6 +580,61 @@ class FreeFlow_AdaptiveEngine:
                 f"(range {warmup_first_real}-{warmup_last_real}).",
                 "INFO",
             )
+
+        def _planned_output_path(list_index: int) -> Path:
+            real_frame = all_frame_numbers[list_index] if list_index < len(all_frame_numbers) else list_index
+            fname = f"{filename_prefix}_frame_{real_frame:04d}.ply"
+            if list_index in warmup_pre_set:
+                return output_dir / "_warmup_temp" / fname
+            return output_dir / fname
+
+        if existing_frames_policy == "Continue (Auto-Resume)":
+            completed_prefix = 0
+            for list_index in indices_to_process:
+                if _planned_output_path(list_index).exists():
+                    completed_prefix += 1
+                else:
+                    break
+
+            if completed_prefix > 0:
+                completed_indices = indices_to_process[:completed_prefix]
+                last_completed_index = completed_indices[-1]
+                last_completed_path = _planned_output_path(last_completed_index)
+                prev_ply = last_completed_path
+
+                indices_to_process = indices_to_process[completed_prefix:]
+                main_processing_indices = [idx for idx in indices_to_process if idx not in warmup_pre_set]
+
+                FreeFlowUtils.log(
+                    f"♻️ Auto-resume: skipping {completed_prefix} completed frame(s), continuing from frame {all_frame_numbers[indices_to_process[0]] if indices_to_process else all_frame_numbers[last_completed_index]}",
+                    "INFO",
+                )
+
+                # Remove potentially stale work folder for first frame to retrain
+                if indices_to_process:
+                    first_resume_real = all_frame_numbers[indices_to_process[0]]
+                    first_resume_work_dir = output_dir / f"frame_{first_resume_real:04d}_work"
+                    if first_resume_work_dir.exists():
+                        shutil.rmtree(first_resume_work_dir, ignore_errors=True)
+
+            if not indices_to_process:
+                if run_postprocess_if_no_training:
+                    main_processing_indices = list(full_main_processing_indices)
+                    FreeFlowUtils.log(
+                        "✅ All selected frames already exist. Running postprocess-only on existing outputs.",
+                        "INFO",
+                    )
+                else:
+                    FreeFlowUtils.log("✅ All selected frames already exist. Nothing to train.", "INFO")
+                    return (str(output_dir), "", "")
+
+        if not main_processing_indices:
+            main_processing_indices = [idx for idx in full_main_processing_indices if idx in indices_to_process]
+            if not main_processing_indices:
+                if full_main_processing_indices:
+                    main_processing_indices = list(full_main_processing_indices)
+                elif indices_to_process:
+                    main_processing_indices = [indices_to_process[-1]]
 
         # Recompute progress totals after distributed anchor + warmup preprocessing
         total_steps_global = len(indices_to_process) * iterations

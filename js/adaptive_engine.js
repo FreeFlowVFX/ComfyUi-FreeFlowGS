@@ -18,6 +18,7 @@ app.registerExtension({
                 const evalCameraWidget = findWidget("eval_camera_index"); // Camera index selector
                 const topoWidget = findWidget("topology_mode");
                 const maskingMethodWidget = findWidget("masking_method");
+                const existingFramesPolicyWidget = findWidget("existing_frames_policy");
 
                 const createAnchorWidget = findWidget("distributed_anchor");
                 const anchorPathWidget = findWidget("distributed_anchor_path");
@@ -78,6 +79,7 @@ app.registerExtension({
                             const viz = asStr(currentVals["visualize_training"], "Off");
                             const topo = asStr(currentVals["topology_mode"]);
                             const dist = asBool(currentVals["distributed_anchor"]);
+                            const framePolicy = asStr(currentVals["existing_frames_policy"], "Continue (Auto-Resume)");
                             const maskingMode = asStr(currentVals["masking_method"], "None (No Masking)");
 
                             let visible = true;
@@ -87,13 +89,15 @@ app.registerExtension({
                                 visible = (maskingMode !== "None (No Masking)");
                             } else if (w.name === "apply_smoothing") {
                                 visible = topo.includes("Fixed");
+                            } else if (w.name === "run_postprocess_if_no_training") {
+                                visible = topo.includes("Fixed") && (framePolicy === "Continue (Auto-Resume)");
                             } else if (w.name === "distributed_anchor_path" || w.name === "distributed_anchor_frame" || w.name === "warmup_frames") {
                                 visible = dist;
                             }
 
                             if (visible && savedIdx < saved.length) {
                                 let val = saved[savedIdx++];
-                                if (["visualize_training", "topology_mode", "masking_method"].includes(w.name)) {
+                                if (["visualize_training", "topology_mode", "masking_method", "existing_frames_policy"].includes(w.name)) {
                                     val = asStr(val, asStr(w.value));
                                 } else if (w.name === "distributed_anchor") {
                                     val = asBool(val);
@@ -120,6 +124,8 @@ app.registerExtension({
                     // 2. Smoothing Controls Visibility
                     const topo = asStr(topoWidget ? topoWidget.value : "");
                     const showSmoothing = topo.includes("Fixed");
+                    const framePolicy = asStr(existingFramesPolicyWidget ? existingFramesPolicyWidget.value : "Continue (Auto-Resume)", "Continue (Auto-Resume)");
+                    const showPostprocessNoTraining = showSmoothing && (framePolicy === "Continue (Auto-Resume)");
 
                     // 3. Distributed Controls Visibility
                     const showDistributed = asBool(createAnchorWidget ? createAnchorWidget.value : false);
@@ -135,6 +141,7 @@ app.registerExtension({
                         if (w.name === "eval_camera_index") return showPreviewControls;
                         if (w.name === "motion_sensitivity") return showMotionSensitivity;
                         if (w.name === "apply_smoothing") return showSmoothing;
+                        if (w.name === "run_postprocess_if_no_training") return showPostprocessNoTraining;
                         if (w.name === "distributed_anchor_path") return showDistributed;
                         if (w.name === "distributed_anchor_frame") return showDistributed;
                         if (w.name === "warmup_frames") return showDistributed;
@@ -155,6 +162,12 @@ app.registerExtension({
 
                 if (topoWidget) {
                     topoWidget.callback = () => {
+                        updateVisibility();
+                    };
+                }
+
+                if (existingFramesPolicyWidget) {
+                    existingFramesPolicyWidget.callback = () => {
                         updateVisibility();
                     };
                 }

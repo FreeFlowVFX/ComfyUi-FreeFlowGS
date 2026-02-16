@@ -86,6 +86,7 @@ app.registerExtension({
 
                 // --- Topology params (show when "Fixed") ---
                 const topoWidget = findWidget("topology_mode");
+                const existingFramesPolicyWidget = findWidget("existing_frames_policy");
                 const fixedTopoParams = [
                     "realign_topology",
                     "apply_smoothing",
@@ -169,6 +170,7 @@ app.registerExtension({
                             const viz = asStr(currentVals["visualize_training"], "Off");
                             const topo = asStr(currentVals["topology_mode"]);
                             const dist = asBool(currentVals["distributed_anchor"]);
+                            const framePolicy = asStr(currentVals["existing_frames_policy"], "Continue (Auto-Resume)");
                             const maskingMode = asStr(currentVals["masking_method"], "None (No Masking)");
 
                             let visible = true;
@@ -180,6 +182,8 @@ app.registerExtension({
                                 visible = isSplatfacto && (maskingMode !== "None (No Masking)");
                             } else if (w.name === "save_mask_debug_images") {
                                 visible = isSplatfacto && (maskingMode !== "None (No Masking)");
+                            } else if (w.name === "run_postprocess_if_no_training") {
+                                visible = topo.includes("Fixed") && (framePolicy === "Continue (Auto-Resume)");
                             } else if (w.name === "initial_quality_preset") {
                                 visible = topo.includes("Fixed");
                             } else if (maskingParams.includes(w.name)) {
@@ -198,7 +202,7 @@ app.registerExtension({
 
                             if (visible && savedIdx < saved.length) {
                                 let val = saved[savedIdx++];
-                                if (["engine_backend", "visualize_training", "topology_mode", "masking_method", "splatfacto_mask_mode"].includes(w.name)) {
+                                if (["engine_backend", "visualize_training", "topology_mode", "masking_method", "splatfacto_mask_mode", "existing_frames_policy"].includes(w.name)) {
                                     val = asStr(val, asStr(w.value));
                                     if (w.name === "engine_backend") {
                                         val = normalizeEngineLabel(val);
@@ -276,6 +280,8 @@ app.registerExtension({
 
                         const topoMode = asStr(topoWidget ? topoWidget.value : "");
                         const isFixedTopo = topoMode.includes("Fixed");
+                        const framePolicy = asStr(existingFramesPolicyWidget ? existingFramesPolicyWidget.value : "Continue (Auto-Resume)", "Continue (Auto-Resume)");
+                        const showPostprocessNoTraining = isFixedTopo && (framePolicy === "Continue (Auto-Resume)");
 
                         const maskingMode = asStr(maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)", "None (No Masking)");
                         const showMotionSensitivity = maskingMode !== "None (No Masking)";
@@ -299,6 +305,9 @@ app.registerExtension({
                             }
                             if (w.name === "initial_quality_preset") {
                                 return isFixedTopo;
+                            }
+                            if (w.name === "run_postprocess_if_no_training") {
+                                return showPostprocessNoTraining;
                             }
                             if (maskingParams.includes(w.name)) {
                                 return true;
@@ -356,6 +365,9 @@ app.registerExtension({
                 }
                 if (topoWidget) {
                     topoWidget.callback = () => updateVisibility();
+                }
+                if (existingFramesPolicyWidget) {
+                    existingFramesPolicyWidget.callback = () => updateVisibility();
                 }
                 if (distributedWidget) {
                     distributedWidget.callback = () => updateVisibility();

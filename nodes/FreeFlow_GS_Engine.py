@@ -161,6 +161,14 @@ class FreeFlow_GS_Engine:
                     "default": "Dynamic (Default-Flicker)",
                     "tooltip": "Topology behavior across frames. Dynamic allows point count changes. Fixed locks topology after anchor for smoother temporal post-processing."
                 }),
+                "existing_frames_policy": (["Continue (Auto-Resume)", "Overwrite (Start Fresh)"], {
+                    "default": "Continue (Auto-Resume)",
+                    "tooltip": "Behavior when frame outputs already exist. Continue resumes from the first missing frame in sequence order. Overwrite retrains from scratch."
+                }),
+                "run_postprocess_if_no_training": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "If auto-resume finds all selected frames already generated, run realign/smoothing postprocess on existing outputs instead of exiting immediately."
+                }),
                 "realign_topology": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Reorder splats consistently between frames before smoothing. Recommended when using Fixed mode and temporal filtering."
@@ -1634,6 +1642,7 @@ class FreeFlow_GS_Engine:
         main_start_index = main_processing_indices[0]
 
         indices_to_process = warmup_pre_indices + main_processing_indices
+        full_main_processing_indices = list(main_processing_indices)
         if warmup_pre_indices:
             first_main_real = all_frame_numbers[main_processing_indices[0]]
             warmup_first_real = all_frame_numbers[warmup_pre_indices[0]]
@@ -1643,6 +1652,92 @@ class FreeFlow_GS_Engine:
                 f"(range {warmup_first_real}-{warmup_last_real}).",
                 "INFO",
             )
+
+        existing_frames_policy = kwargs.get("existing_frames_policy", "Continue (Auto-Resume)")
+
+        def _as_bool(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+
+        run_postprocess_if_no_training = _as_bool(kwargs.get("run_postprocess_if_no_training", False))
+
+        def _planned_output_path(list_index: int) -> Path:
+            real_id = all_frame_numbers[list_index]
+            fname = f"{filename_prefix}_frame_{real_id:04d}.ply"
+            if list_index in warmup_pre_set:
+                return output_dir / "_warmup_temp" / fname
+            return output_dir / fname
+
+        if existing_frames_policy == "Continue (Auto-Resume)":
+            completed_prefix = 0
+            for list_index in indices_to_process:
+                if _planned_output_path(list_index).exists():
+                    completed_prefix += 1
+                else:
+                    break
+
+            if completed_prefix > 0:
+                completed_indices = indices_to_process[:completed_prefix]
+                last_completed_index = completed_indices[-1]
+                last_completed_path = _planned_output_path(last_completed_index)
+                prev_ply = last_completed_path
+                prev_ply_path = prev_ply
+
+                # Recover Splatfacto checkpoint chain after restart.
+                if is_splatfacto and hasattr(engine, "get_checkpoint_path"):
+                    recovered_ckpt = None
+                    for list_index in reversed(completed_indices):
+                        real_id = all_frame_numbers[list_index]
+                        frame_name = f"{filename_prefix}_frame_{real_id:04d}"
+                        ckpt_dir = engine.get_checkpoint_path(output_dir / "nerfstudio_outputs", frame_name)
+                        if ckpt_dir:
+                            recovered_ckpt = ckpt_dir
+                            break
+                    if recovered_ckpt and hasattr(engine, "last_checkpoint_dir"):
+                        engine.last_checkpoint_dir = recovered_ckpt
+                        FreeFlowUtils.log(f"♻️ Recovered Splatfacto checkpoint chain: {recovered_ckpt}", "INFO")
+                    elif is_splatfacto:
+                        FreeFlowUtils.log("⚠️ Auto-resume found existing frames but no checkpoint chain was recovered.", "WARN")
+
+                indices_to_process = indices_to_process[completed_prefix:]
+                main_processing_indices = [idx for idx in indices_to_process if idx not in warmup_pre_set]
+
+                FreeFlowUtils.log(
+                    f"♻️ Auto-resume: skipping {completed_prefix} completed frame(s), continuing from frame {all_frame_numbers[indices_to_process[0]] if indices_to_process else all_frame_numbers[last_completed_index]}",
+                    "INFO",
+                )
+
+                # Remove potentially stale work folder for the first frame to be retrained.
+                if indices_to_process:
+                    first_resume_real = all_frame_numbers[indices_to_process[0]]
+                    first_resume_work_dir = output_dir / f"frame_{first_resume_real:04d}_work"
+                    if first_resume_work_dir.exists():
+                        shutil.rmtree(first_resume_work_dir, ignore_errors=True)
+
+            if not indices_to_process:
+                if run_postprocess_if_no_training:
+                    main_processing_indices = list(full_main_processing_indices)
+                    FreeFlowUtils.log(
+                        "✅ All selected frames already exist. Running postprocess-only on existing outputs.",
+                        "INFO",
+                    )
+                else:
+                    FreeFlowUtils.log("✅ All selected frames already exist. Nothing to train.", "INFO")
+                    return (str(output_dir),)
+
+        # Keep postprocess scope tied to the selected main-range frames
+        if not main_processing_indices:
+            main_processing_indices = [idx for idx in full_main_processing_indices if idx in indices_to_process]
+            if not main_processing_indices:
+                if full_main_processing_indices:
+                    main_processing_indices = list(full_main_processing_indices)
+                elif indices_to_process:
+                    main_processing_indices = [indices_to_process[-1]]
 
         # Topology mode flag
         is_fixed_topology = "Fixed" in topology_mode
