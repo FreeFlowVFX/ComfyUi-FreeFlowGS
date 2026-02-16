@@ -68,6 +68,7 @@ app.registerExtension({
                 const splatfactoParams = [
                     "splatfacto_viewer",
                     "splatfacto_variant",
+                    "splatfacto_mask_mode",
                     "cull_alpha_thresh",
                     "splatfacto_densify_grad_thresh",
                     "use_scale_regularization",
@@ -134,6 +135,7 @@ app.registerExtension({
                         currentVals["topology_mode"] = "Dynamic (Default-Flicker)";
                         currentVals["distributed_anchor"] = false;
                         currentVals["masking_method"] = "None (No Masking)";
+                        currentVals["splatfacto_mask_mode"] = "Blend Static From Previous (Recommended)";
 
                         for (const w of this._freeflow_all_widgets) {
                             const engine = currentVals["engine_backend"];
@@ -148,6 +150,8 @@ app.registerExtension({
                                 visible = true;
                             } else if (w.name === "motion_sensitivity") {
                                 visible = (currentVals["masking_method"] !== "None (No Masking)");
+                            } else if (w.name === "splatfacto_mask_mode") {
+                                visible = isSplatfacto && (currentVals["masking_method"] !== "None (No Masking)");
                             } else if (w.name === "initial_quality_preset") {
                                 visible = (topo && topo.includes("Fixed"));
                             } else if (maskingParams.includes(w.name)) {
@@ -244,6 +248,9 @@ app.registerExtension({
                             }
                             if (w.name === "motion_sensitivity") {
                                 return showMotionSensitivity;
+                            }
+                            if (w.name === "splatfacto_mask_mode") {
+                                return isSplatfacto && showMotionSensitivity;
                             }
                             if (w.name === "initial_quality_preset") {
                                 return isFixedTopo;

@@ -235,7 +235,11 @@ class FreeFlow_GS_Engine:
                 }),
                 "motion_sensitivity": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Mask sensitivity for motion detection. Lower catches subtle motion; higher keeps only strong motion."
+                    "tooltip": "Mask sensitivity for motion detection. Higher values detect subtler motion (larger moving region); lower values keep only stronger motion."
+                }),
+                "splatfacto_mask_mode": (["Mask Only (Current)", "Blend Static From Previous (Recommended)"], {
+                    "default": "Blend Static From Previous (Recommended)",
+                    "tooltip": "[Splatfacto] Mask behavior for moving regions. Mask Only: sends binary masks to nerfstudio (current behavior). Blend Static From Previous: composites static (black-mask) pixels from previous frame before training, which reduces seam artifacts while preserving fixed-mode point count/order."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -489,7 +493,9 @@ class FreeFlow_GS_Engine:
             if match: final_indices.append(idx)
         return sorted(final_indices)
 
-    def _prepare_dataset(self, frame_work_dir, multicam_feed, frame_idx, anchor_sparse, filename_map, use_symlinks=True, mask_engine=None, prev_images_paths=None, masking_method=None):
+    def _prepare_dataset(self, frame_work_dir, multicam_feed, frame_idx, anchor_sparse, filename_map,
+                         use_symlinks=True, mask_engine=None, prev_images_paths=None, masking_method=None,
+                         is_splatfacto=False, splatfacto_mask_mode="Mask Only (Current)"):
         """
         Prepares standard COLMAP format:
         /images/ (symlinked from input)
@@ -509,6 +515,13 @@ class FreeFlow_GS_Engine:
                 except: pass 
             shutil.copy2(src, dst); return False
 
+        use_splatfacto_blend = (
+            is_splatfacto
+            and splatfacto_mask_mode == "Blend Static From Previous (Recommended)"
+            and masking_method is not None
+            and masking_method != "None (No Masking)"
+        )
+
         for cam in cameras:
             frames = multicam_feed[cam]
             if frame_idx < len(frames):
@@ -522,21 +535,65 @@ class FreeFlow_GS_Engine:
                 
                 dst_img = img_dir / dst_name
                 
-                mask_applied = False
+                wrote_custom_image = False
                 if mask_engine and prev_images_paths and prev_images_paths.get(cam):
-                    # Compute Opical Flow Mask
+                    # Compute optical-flow motion mask
                     prev_img = prev_images_paths[cam]
                     mask_path = frame_work_dir / f"mask_{cam}.png"
                     generated_mask = mask_engine.compute_mask(src_img, prev_img, mask_path, method=masking_method)
                     if generated_mask:
-                        mask_dir = frame_work_dir / "masks"
-                        mask_dir.mkdir(exist_ok=True)
-                        dst_mask = mask_dir / f"{Path(dst_name).stem}.png"
-                        shutil.move(str(generated_mask), dst_mask)
-                        mask_applied = True
-                
-                # If mask applied, we might need copy not link? No, input img is same.
-                safe_link(src_img, dst_img, use_symlinks)
+                        if use_splatfacto_blend:
+                            # Blend static (black-mask) regions from previous frame.
+                            # This preserves temporal continuity in masked zones while keeping
+                            # fixed-mode point count/order behavior unchanged.
+                            try:
+                                import cv2
+
+                                curr = cv2.imread(str(src_img), cv2.IMREAD_COLOR)
+                                prev = cv2.imread(str(prev_img), cv2.IMREAD_COLOR)
+                                mask = cv2.imread(str(generated_mask), cv2.IMREAD_GRAYSCALE)
+
+                                if curr is not None and prev is not None and mask is not None:
+                                    if prev.shape[:2] != curr.shape[:2]:
+                                        prev = cv2.resize(prev, (curr.shape[1], curr.shape[0]), interpolation=cv2.INTER_LINEAR)
+                                    if mask.shape[:2] != curr.shape[:2]:
+                                        mask = cv2.resize(mask, (curr.shape[1], curr.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                                    kernel = np.ones((3, 3), np.uint8)
+                                    mask = cv2.dilate(mask, kernel, iterations=1)
+                                    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=1.2, sigmaY=1.2)
+
+                                    alpha = np.clip(mask.astype(np.float32) / 255.0, 0.0, 1.0)
+                                    alpha = alpha[..., None]
+
+                                    blended = curr.astype(np.float32) * alpha + prev.astype(np.float32) * (1.0 - alpha)
+                                    blended = np.clip(blended, 0, 255).astype(np.uint8)
+
+                                    cv2.imwrite(str(dst_img), blended)
+                                    wrote_custom_image = True
+
+                                    if active_cams < 3:
+                                        motion_coverage = float(alpha.mean())
+                                        print(f"[FreeFlow] Blend Mask {cam}: motion coverage={motion_coverage:.3f}")
+                            except Exception as blend_ex:
+                                FreeFlowUtils.log(f"Splatfacto mask blending failed for {cam}: {blend_ex}", "WARN")
+                        else:
+                            # Original mask-only path (used by Brush/OpenSplat and optional Splatfacto mode)
+                            mask_dir = frame_work_dir / "masks"
+                            mask_dir.mkdir(exist_ok=True)
+                            dst_mask = mask_dir / f"{Path(dst_name).stem}.png"
+                            shutil.move(str(generated_mask), dst_mask)
+
+                        # Remove temporary generated mask file if it still exists
+                        try:
+                            generated_mask_path = Path(generated_mask)
+                            if generated_mask_path.exists():
+                                generated_mask_path.unlink()
+                        except Exception:
+                            pass
+
+                if not wrote_custom_image:
+                    safe_link(src_img, dst_img, use_symlinks)
                 
                 if prev_images_paths is not None: prev_images_paths[cam] = src_img
                 active_cams += 1
@@ -1611,7 +1668,9 @@ class FreeFlow_GS_Engine:
             # A. Prepare Dataset (Images, Masks, Sparse)
             self._prepare_dataset(
                 frame_work_dir, multicam_feed, i, anchor_sparse, filename_map, 
-                kwargs.get("use_symlinks", True), mask_engine, prev_images_paths, kwargs.get("masking_method")
+                kwargs.get("use_symlinks", True), mask_engine, prev_images_paths, kwargs.get("masking_method"),
+                is_splatfacto=is_splatfacto,
+                splatfacto_mask_mode=kwargs.get("splatfacto_mask_mode", "Blend Static From Previous (Recommended)"),
             )
             
             # B. Guidance / Warm Start Logic
