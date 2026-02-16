@@ -171,11 +171,11 @@ class FreeFlow_GS_Engine:
                 }),
                 "initial_iterations_override": ("INT", {
                     "default": 12000, "min": 0, "max": 100000,
-                    "tooltip": "[Fixed mode] Initial-frame iterations override. 0 disables override. Applies only to the first training frame in the run (or anchor generation frame in distributed producer mode)."
+                    "tooltip": "[Fixed mode] Initial-frame iterations override. 0 disables override. Applies only to the first training frame in the run (or anchor generation frame in distributed producer mode). In distributed consumer mode this override is skipped to preserve anchor consistency."
                 }),
                 "initial_quality_preset": (["Off (Use Base Params)", "High (Recommended)", "Extreme (Slow)"], {
                     "default": "High (Recommended)",
-                    "tooltip": "[Fixed + Splatfacto] First-frame quality preset. Off: use base params. High: variant=splatfacto-big, refine_every=100, warmup_length=700, densify_grad_thresh=0.0012, num_downscales=max(base-1,0), cull_alpha_thresh=0.22. Extreme: variant=splatfacto-big, refine_every=80, warmup_length=500, densify_grad_thresh=0.0010, num_downscales=0, cull_alpha_thresh=0.20."
+                    "tooltip": "[Fixed mode] First-frame quality preset. Off: use base params. High (Splatfacto): variant=splatfacto-big, refine=100, warmup=700, densify=0.0012, downscale=max(base-1,0), cull=0.22. High (Brush): splat_count=700000, densification_interval=120, densify_grad_threshold=0.00003, growth_select_fraction=0.14. Extreme (Splatfacto): variant=splatfacto-big, refine=80, warmup=500, densify=0.0010, downscale=0, cull=0.20. Extreme (Brush): splat_count=1000000, densification_interval=80, densify_grad_threshold=0.00002, growth_select_fraction=0.18. In distributed consumer mode preset overrides are skipped to preserve anchor consistency."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -1542,6 +1542,9 @@ class FreeFlow_GS_Engine:
         # Consumer machines should continue from anchor checkpoint as-is (no first-frame densify boost)
         initial_override_allowed = not (distributed_anchor and distributed_mode == "consumer")
 
+        # In distributed consumer mode, lock fixed topology from the first processed frame
+        lock_topology_from_first_frame = is_fixed_topology and distributed_anchor and distributed_mode == "consumer"
+
         # Progress Bar Setup (account for initial-frame iteration override)
         total_steps_global = len(indices_to_process) * iterations
         if is_fixed_topology and initial_override_allowed and initial_iterations_override > 0 and len(indices_to_process) > 0:
@@ -1737,7 +1740,7 @@ class FreeFlow_GS_Engine:
                 # Fixed topology for Splatfacto: lock immediately after anchor frame
                 # Frame 0: Establish topology (allow densification)
                 # Frame 1+: Lock topology (no further densification)
-                if is_fixed_topology and idx_seq > 0:
+                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
                     params['continue_cull_post_densification'] = False
                     print(f"   🔒 [Fixed Topology] Frame {real_id}: Splatfacto topology locked (no densification)")
             elif is_opensplat:
@@ -1747,7 +1750,7 @@ class FreeFlow_GS_Engine:
                     'downscale_factor': 1,  # Could be exposed as param later
                 })
                 # Fixed topology for OpenSplat
-                if is_fixed_topology and idx_seq > 0:
+                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
                     # OpenSplat may have different flags for topology locking
                     print(f"   🔒 [Fixed Topology] Frame {i}: OpenSplat warm start (topology via resume)")
             else:
@@ -1780,11 +1783,27 @@ class FreeFlow_GS_Engine:
                 params.update({
                     'scale_loss_weight': kwargs.get('scale_loss_weight', 1e-8),
                 })
+
+                # Fixed-mode initial quality preset (first frame only)
+                if is_initial_quality_frame:
+                    preset = str(initial_quality_preset)
+                    if preset == "High (Recommended)":
+                        params['splat_count'] = 700000
+                        params['densification_interval'] = 120
+                        params['densify_grad_threshold'] = 0.00003
+                        params['growth_select_fraction'] = 0.14
+                        print("   ⭐ [Fixed Init Preset] High applied for Brush (splat_count=700k, refine=120, densify=3e-5)")
+                    elif preset == "Extreme (Slow)":
+                        params['splat_count'] = 1000000
+                        params['densification_interval'] = 80
+                        params['densify_grad_threshold'] = 0.00002
+                        params['growth_select_fraction'] = 0.18
+                        print("   ⭐ [Fixed Init Preset] Extreme applied for Brush (splat_count=1.0M, refine=80, densify=2e-5)")
                 
                 # Add Fixed Topology CLI flags for Brush if enabled AND not first frame
                 # Frame 0: Establish topology (allow densification with defaults for max growth)
                 # Frame 1+: Fixed topology (lock to preserve established structure)
-                if is_fixed_topology and idx_seq > 0:
+                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
                     params['growth_stop_iter'] = 0  # Stop adding points immediately (no growth)
                     params['densification_interval'] = 999999  # Disable refinement (no split/clone/replace)
                     print(f"   🔒 [Fixed Topology] Frame {real_id}: Topology Locked (Strict Frozen Mode)")

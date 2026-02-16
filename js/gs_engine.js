@@ -150,7 +150,7 @@ app.registerExtension({
                             } else if (w.name === "motion_sensitivity") {
                                 visible = (currentVals["masking_method"] !== "None (No Masking)");
                             } else if (w.name === "initial_quality_preset") {
-                                visible = (topo && topo.includes("Fixed")) && isSplatfacto;
+                                visible = (topo && topo.includes("Fixed"));
                             } else if (maskingParams.includes(w.name)) {
                                 visible = true;
                             } else if (brushParams.includes(w.name)) {
@@ -247,7 +247,7 @@ app.registerExtension({
                                 return showMotionSensitivity;
                             }
                             if (w.name === "initial_quality_preset") {
-                                return isFixedTopo && isSplatfacto;
+                                return isFixedTopo;
                             }
                             if (maskingParams.includes(w.name)) {
                                 return true;
