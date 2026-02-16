@@ -69,6 +69,7 @@ app.registerExtension({
                     "splatfacto_viewer",
                     "splatfacto_variant",
                     "splatfacto_mask_mode",
+                    "save_mask_debug_images",
                     "cull_alpha_thresh",
                     "splatfacto_densify_grad_thresh",
                     "use_scale_regularization",
@@ -159,6 +160,7 @@ app.registerExtension({
                         currentVals["distributed_anchor"] = false;
                         currentVals["masking_method"] = "None (No Masking)";
                         currentVals["splatfacto_mask_mode"] = "Blend Static From Previous (Recommended)";
+                        currentVals["save_mask_debug_images"] = false;
 
                         for (const w of this._freeflow_all_widgets) {
                             const engine = normalizeEngineLabel(currentVals["engine_backend"]);
@@ -175,6 +177,8 @@ app.registerExtension({
                             } else if (w.name === "motion_sensitivity") {
                                 visible = (maskingMode !== "None (No Masking)");
                             } else if (w.name === "splatfacto_mask_mode") {
+                                visible = isSplatfacto && (maskingMode !== "None (No Masking)");
+                            } else if (w.name === "save_mask_debug_images") {
                                 visible = isSplatfacto && (maskingMode !== "None (No Masking)");
                             } else if (w.name === "initial_quality_preset") {
                                 visible = topo.includes("Fixed");
@@ -288,6 +292,9 @@ app.registerExtension({
                                 return showMotionSensitivity;
                             }
                             if (w.name === "splatfacto_mask_mode") {
+                                return isSplatfacto && showMotionSensitivity;
+                            }
+                            if (w.name === "save_mask_debug_images") {
                                 return isSplatfacto && showMotionSensitivity;
                             }
                             if (w.name === "initial_quality_preset") {

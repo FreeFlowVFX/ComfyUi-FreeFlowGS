@@ -76,7 +76,7 @@ class FreeFlow_AdaptiveEngine:
                 "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
                 "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize first frame from COLMAP sparse point cloud. Essential for correct 3D scale and camera alignment. Only disable for testing."}),
                 "masking_method": (["None (No Masking)", "Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "None (No Masking)", "tooltip": "How to detect motion between frames. None disables masking. Optical Flow: accurate but slower. Simple Diff: fast but may flicker on subtle motion."}),
-                "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "How aggressively to mask static areas. 0=no masking. 1=mask everything static. 0.3 is safe default to prevent background 'swimming'."}),
+                "motion_sensitivity": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.001, "tooltip": "Mask sensitivity for motion detection. Higher values detect subtler motion (larger moving region); lower values keep only stronger motion. For excluding only fully static areas, start around 0.80-0.90."}),
                 
                 # --- 7. Output & Storage ---
                 "custom_output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "leave empty for default output", "tooltip": "Custom folder for PLY output. Leave empty to use ComfyUI output folder. Use absolute path like D:/Project/Splats."}),
@@ -373,7 +373,7 @@ class FreeFlow_AdaptiveEngine:
                    iterations=30000, learning_rate=0.00002, densification_interval=200,
                    densify_grad_threshold=0.00015, growth_select_fraction=0.12,
                    feature_lr=0.0025, gaussian_lr=0.007, opacity_lr=0.01, scale_loss_weight=1e-8,
-                   frame_selection="all", init_from_sparse=True, masking_method="None (No Masking)", motion_sensitivity=0.3,
+                   frame_selection="all", init_from_sparse=True, masking_method="None (No Masking)", motion_sensitivity=0.85,
                    custom_output_path="", filename_prefix="FreeFlow_Splat", use_symlinks=True, cleanup_work_dirs=True,
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
                    unique_id=None, preview_camera_filter=""):

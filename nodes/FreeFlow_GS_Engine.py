@@ -234,12 +234,16 @@ class FreeFlow_GS_Engine:
                     "tooltip": "Mask generation method for moving regions. None disables masks. Optical Flow is robust, Simple Diff is faster."
                 }),
                 "motion_sensitivity": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Mask sensitivity for motion detection. Higher values detect subtler motion (larger moving region); lower values keep only stronger motion."
+                    "default": 0.85, "min": 0.0, "max": 1.0, "step": 0.001,
+                    "tooltip": "Mask sensitivity for motion detection. Higher values detect subtler motion (larger moving region); lower values keep only stronger motion. For excluding only fully static areas, start around 0.80-0.90."
                 }),
                 "splatfacto_mask_mode": (["Mask Only (Current)", "Blend Static From Previous (Recommended)"], {
                     "default": "Blend Static From Previous (Recommended)",
                     "tooltip": "[Splatfacto] Mask behavior for moving regions. Mask Only: writes masks/ folder and uses nerfstudio --masks-path. Blend Static From Previous: still computes optical-flow masks, but applies them directly to build blended training images (no masks/ folder), which reduces seam artifacts while preserving fixed-mode point count/order."
+                }),
+                "save_mask_debug_images": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "[Splatfacto] Save mask/blend debug images to output/MaskDebug for inspection. Works with both mask modes and is useful to verify optical-flow coverage/frame blending."
                 }),
                 
                 # ═══════════════════════════════════════════════════════════════
@@ -495,7 +499,8 @@ class FreeFlow_GS_Engine:
 
     def _prepare_dataset(self, frame_work_dir, multicam_feed, frame_idx, anchor_sparse, filename_map,
                          use_symlinks=True, mask_engine=None, prev_images_paths=None, masking_method=None,
-                         is_splatfacto=False, splatfacto_mask_mode="Mask Only (Current)"):
+                         is_splatfacto=False, splatfacto_mask_mode="Mask Only (Current)",
+                         save_mask_debug_images=False):
         """
         Prepares standard COLMAP format:
         /images/ (symlinked from input)
@@ -522,6 +527,9 @@ class FreeFlow_GS_Engine:
             and masking_method != "None (No Masking)"
         )
 
+        debug_enabled = bool(is_splatfacto and save_mask_debug_images and masking_method and masking_method != "None (No Masking)")
+        debug_root = frame_work_dir.parent / "MaskDebug" if debug_enabled else None
+
         for cam in cameras:
             frames = multicam_feed[cam]
             if frame_idx < len(frames):
@@ -542,6 +550,15 @@ class FreeFlow_GS_Engine:
                     mask_path = frame_work_dir / f"mask_{cam}.png"
                     generated_mask = mask_engine.compute_mask(src_img, prev_img, mask_path, method=masking_method)
                     if generated_mask:
+                        debug_frame_dir = None
+                        if debug_enabled and debug_root is not None:
+                            debug_frame_dir = debug_root / frame_work_dir.name
+                            debug_frame_dir.mkdir(parents=True, exist_ok=True)
+                            try:
+                                shutil.copy2(str(generated_mask), str(debug_frame_dir / f"{Path(dst_name).stem}_mask.png"))
+                            except Exception:
+                                pass
+
                         if use_splatfacto_blend:
                             # Blend static (black-mask) regions from previous frame.
                             # This preserves temporal continuity in masked zones while keeping
@@ -571,6 +588,14 @@ class FreeFlow_GS_Engine:
 
                                     cv2.imwrite(str(dst_img), blended)
                                     wrote_custom_image = True
+
+                                    if debug_frame_dir is not None:
+                                        try:
+                                            cv2.imwrite(str(debug_frame_dir / f"{Path(dst_name).stem}_current.png"), curr)
+                                            cv2.imwrite(str(debug_frame_dir / f"{Path(dst_name).stem}_previous.png"), prev)
+                                            cv2.imwrite(str(debug_frame_dir / f"{Path(dst_name).stem}_blended.png"), blended)
+                                        except Exception:
+                                            pass
 
                                     if active_cams < 3:
                                         motion_coverage = float(alpha.mean())
@@ -1417,8 +1442,8 @@ class FreeFlow_GS_Engine:
             FreeFlowUtils.log("Masking: Disabled (No Masking)", "INFO")
         else:
             from .modules.motion_masking import MotionMasking
-            mask_engine = MotionMasking(sensitivity=kwargs.get("motion_sensitivity", 0.3))
-            FreeFlowUtils.log(f"Masking: {masking_method} (sensitivity={kwargs.get('motion_sensitivity', 0.3)})", "INFO")
+            mask_engine = MotionMasking(sensitivity=kwargs.get("motion_sensitivity", 0.85))
+            FreeFlowUtils.log(f"Masking: {masking_method} (sensitivity={kwargs.get('motion_sensitivity', 0.85)})", "INFO")
         
         # 4. Frame Management
         cameras = list(multicam_feed.keys())
@@ -1671,6 +1696,7 @@ class FreeFlow_GS_Engine:
                 kwargs.get("use_symlinks", True), mask_engine, prev_images_paths, kwargs.get("masking_method"),
                 is_splatfacto=is_splatfacto,
                 splatfacto_mask_mode=kwargs.get("splatfacto_mask_mode", "Blend Static From Previous (Recommended)"),
+                save_mask_debug_images=kwargs.get("save_mask_debug_images", False),
             )
             
             # B. Guidance / Warm Start Logic
