@@ -13,6 +13,7 @@ import subprocess
 import os
 import sys
 import re
+import json
 import threading
 import numpy as np
 import scipy.spatial  # For KDTree
@@ -168,13 +169,21 @@ class FreeFlow_GS_Engine:
                     "default": False,
                     "tooltip": "Run temporal smoothing on the final sequence. Works best with Fixed topology and at least 4 frames."
                 }),
+                "initial_iterations_override": ("INT", {
+                    "default": 12000, "min": 0, "max": 100000,
+                    "tooltip": "[Fixed mode] Initial-frame iterations override. 0 disables override. Applies only to the first training frame in the run (or anchor generation frame in distributed producer mode)."
+                }),
+                "initial_quality_preset": (["Off (Use Base Params)", "High (Recommended)", "Extreme (Slow)"], {
+                    "default": "High (Recommended)",
+                    "tooltip": "[Fixed + Splatfacto] First-frame quality preset. Off: use base params. High: variant=splatfacto-big, refine_every=100, warmup_length=700, densify_grad_thresh=0.0012, num_downscales=max(base-1,0), cull_alpha_thresh=0.22. Extreme: variant=splatfacto-big, refine_every=80, warmup_length=500, densify_grad_thresh=0.0010, num_downscales=0, cull_alpha_thresh=0.20."
+                }),
                 
                 # ═══════════════════════════════════════════════════════════════
                 # CORE TRAINING PARAMETERS [SHARED]
                 # ═══════════════════════════════════════════════════════════════
                 "iterations": ("INT", {
-                    "default": 4000, "min": 100, "max": 100000,
-                    "tooltip": "Training steps per frame. Higher improves quality but increases time. Typical: Brush 4k-8k, Splatfacto 15k-30k."
+                    "default": 6000, "min": 100, "max": 100000,
+                    "tooltip": "Training steps per frame after initialization. Higher improves quality but increases time. Production baseline: Brush 6k-10k, Splatfacto 10k-25k."
                 }),
                 "sh_degree": ("INT", {
                     "default": 3, "min": 0, "max": 3,
@@ -233,12 +242,12 @@ class FreeFlow_GS_Engine:
                 # SPLATFACTO-SPECIFIC PARAMETERS
                 # ═══════════════════════════════════════════════════════════════
                 "cull_alpha_thresh": ("FLOAT", {
-                    "default": 0.3, "min": 0.001, "max": 0.5, "step": 0.001,
-                    "tooltip": "Splatfacto opacity culling threshold. Higher removes more dark/transparent junk splats. Lower keeps more faint detail."
+                    "default": 0.22, "min": 0.001, "max": 0.5, "step": 0.001,
+                    "tooltip": "Splatfacto opacity culling threshold. Higher removes more dark/transparent junk splats. Lower keeps more faint detail and can improve edge coverage."
                 }),
                 "splatfacto_densify_grad_thresh": ("FLOAT", {
-                    "default": 0.0015, "min": 0.0001, "max": 0.01, "step": 0.0001,
-                    "tooltip": "Splatfacto growth threshold. Higher reduces aggressive growth and garbage splats; lower adds detail faster."
+                    "default": 0.0012, "min": 0.0001, "max": 0.01, "step": 0.0001,
+                    "tooltip": "Splatfacto growth threshold. Lower grows denser detail (and can add noise); higher is cleaner but less dense."
                 }),
                 "use_scale_regularization": ("BOOLEAN", {
                     "default": True,
@@ -251,16 +260,16 @@ class FreeFlow_GS_Engine:
                     "tooltip": "Maximum Gaussian cap (advanced). Only relevant on newer/MCMC strategies; ignored by most default runs."
                 }),
                 "refine_every": ("INT", {
-                    "default": 150, "min": 10, "max": 1000,
-                    "tooltip": "Splatfacto refine interval. Lower refines more often; higher is cleaner and less noisy."
+                    "default": 120, "min": 10, "max": 1000,
+                    "tooltip": "Splatfacto refine interval. Lower increases split/prune frequency and density; higher is more conservative."
                 }),
                 "warmup_length": ("INT", {
-                    "default": 1000, "min": 0, "max": 5000,
-                    "tooltip": "Initial steps before densify/prune begins. Longer warmup stabilizes early geometry and reduces junk growth."
+                    "default": 800, "min": 0, "max": 5000,
+                    "tooltip": "Initial steps before densify/prune starts. Shorter warmup increases early growth; longer warmup is more stable."
                 }),
                 "num_downscales": ("INT", {
-                    "default": 2, "min": 0, "max": 5,
-                    "tooltip": "Initial image downscale level. Higher is faster but softer; lower is sharper but heavier."
+                    "default": 1, "min": 0, "max": 5,
+                    "tooltip": "Initial image downscale level. Lower values preserve fine detail (better quality) but increase memory/time."
                 }),
                 "cull_screen_size": ("FLOAT", {
                     "default": 0.15, "min": 0.01, "max": 1.0, "step": 0.01,
@@ -316,19 +325,19 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 "distributed_anchor": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable distributed workflow with a shared anchor frame/model across machines."
+                    "tooltip": "Enable distributed multi-machine workflow. One machine can produce the anchor, others consume it for consistent sequence initialization."
                 }),
                 "distributed_anchor_path": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Path to an existing anchor PLY for distributed runs. Leave empty to auto-create anchor."
+                    "tooltip": "Optional explicit anchor source path. Splatfacto accepts checkpoint dir/.ckpt/anchor metadata .json. Brush/OpenSplat accept anchor PLY path. Leave empty to auto-resolve from Distributed_Anchor."
                 }),
                 "distributed_anchor_frame": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Frame ID to use as anchor. Leave empty to use the first selected frame."
+                    "tooltip": "Real frame ID to use as distributed anchor. If missing from selected range, it is inserted first in producer mode."
                 }),
                 "warmup_frames": ("INT", {
                     "default": 0, "min": 0, "max": 1000,
-                    "tooltip": "Number of initial frames to train without final export (useful for distributed overlap/warmup)."
+                    "tooltip": "Number of initial processed frames to keep as warmup-only outputs. Anchor frame is always preserved and never treated as warmup."
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -617,22 +626,35 @@ class FreeFlow_GS_Engine:
             else:
                 self._cached_seconds_per_step = new_rate
 
-    def _apply_temporal_smoothing(self, output_dir, prefix, indices, multicam_feed, cameras, realign_topology=True):
+    def _apply_temporal_smoothing(self, output_dir, prefix, indices, multicam_feed, cameras,
+                                  realign_topology=True, do_smoothing=True, source_dir=None, out_subdir=None):
         """
-        Applies Savitzky-Golay filtering to the positions of the sequence.
-        ONLY works for Fixed Topology mode where point count is constant.
-        SAVES to a 'smoothed' subfolder to preserve original trained files.
-        
-        If realign_topology is True, performs KD-Tree based point ID realignment
-        before smoothing to fix point order shuffling from Brush.
+        Applies topology realignment and optional Savitzky-Golay smoothing.
+
+        Writes post-processed outputs into dedicated subfolders to preserve raw training outputs:
+        - realigned/: topology realignment only
+        - smoothed/: temporal smoothing (optionally from realigned source)
+
+        Args:
+            realign_topology: Whether to run KD-tree point-ID realignment.
+            do_smoothing: Whether to apply Savitzky-Golay smoothing.
+            source_dir: Folder containing source PLYs (defaults to output_dir root).
+            out_subdir: Destination subfolder name (defaults by mode).
+
+        Returns:
+            Path to output folder on success, None if skipped/failed.
         """
-        if not indices: return
-        
-        # Create smoothed output folder (preserve originals!)
-        smoothed_dir = output_dir / "smoothed"
-        smoothed_dir.mkdir(exist_ok=True)
-        FreeFlowUtils.log(f"   📁 Smoothed output will be saved to: {smoothed_dir}")
-        
+        if not indices:
+            return None
+
+        source_base = Path(source_dir) if source_dir else output_dir
+        if out_subdir is None:
+            out_subdir = "smoothed" if do_smoothing else "realigned"
+
+        out_dir = output_dir / out_subdir
+        out_dir.mkdir(exist_ok=True)
+        FreeFlowUtils.log(f"   📁 {out_subdir.capitalize()} output will be saved to: {out_dir}")
+
         # Extract REAL frame IDs from source image filenames
         first_cam = cameras[0]
         real_frame_ids = []
@@ -640,129 +662,137 @@ class FreeFlow_GS_Engine:
             if i < len(multicam_feed[first_cam]):
                 real_id = self._extract_frame_number(multicam_feed[first_cam][i])
             else:
-                real_id = i  # Fallback
+                real_id = i
             real_frame_ids.append(real_id)
-        
-        # Source PLY files (originals - read only) - use REAL frame IDs
-        source_files = [output_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
-        # Destination PLY files (smoothed folder) - use REAL frame IDs
-        output_files = [smoothed_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
-        
-        # Check first file to get vertex count and header size
-        first_ply = source_files[0]
-        if not first_ply.exists(): return
-        
-        # Helper to get header size and offsets
+
+        source_files = [source_base / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
+        output_files = [out_dir / f"{prefix}_frame_{fid:04d}.ply" for fid in real_frame_ids]
+
+        # Pair files so missing frames never shift output indexing
+        file_pairs = []
+        for fid, src, dst in zip(real_frame_ids, source_files, output_files):
+            if not src.exists():
+                FreeFlowUtils.log(f"Skipping missing source frame {fid:04d}: {src}", "WARN")
+                continue
+            file_pairs.append((fid, src, dst))
+
+        if not file_pairs:
+            FreeFlowUtils.log("No valid source frames found for post-processing.", "WARN")
+            return None
+
+        # Parse PLY layout helper
         def get_ply_meta(path):
             with open(path, "rb") as f:
                 header = b""
                 while True:
                     line = f.readline()
+                    if not line:
+                        break
                     header += line
-                    if line.strip() == b"end_header": break
-                
+                    if line.strip() == b"end_header":
+                        break
                 header_str = header.decode("utf-8", errors="ignore")
                 m = re.search(r"element vertex (\d+)", header_str)
-                count = int(m.group(1))
-                
-                return len(header), count
-        
-        header_len, vertex_count = get_ply_meta(first_ply)
-        
-        # Load all data
-        all_data = []  # List of bytearrays (mutable)
-        
-        for p in source_files:
-            if not p.exists():
-                all_data.append(None)
+                if not m:
+                    return None, None
+                return len(header), int(m.group(1))
+
+        # Load/validate all frame buffers with a consistent layout
+        all_data = []
+        valid_pairs = []
+        header_len = None
+        vertex_count = None
+        stride = None
+
+        for fid, src, dst in file_pairs:
+            local_header_len, local_vertex_count = get_ply_meta(src)
+            if local_header_len is None or local_vertex_count is None or local_vertex_count <= 0:
+                FreeFlowUtils.log(f"Invalid PLY header for frame {fid:04d}: {src}", "WARN")
                 continue
-            with open(p, "rb") as f:
-                data = bytearray(f.read())  # Read everything
-                all_data.append(data)
-        
-        # Check consistency
-        valid_data = [d for d in all_data if d is not None]
-        if not valid_data: return
-        
-        # Find offset of data start
-        data_start = header_len 
-        
-        # Stride calculation
-        total_len = len(valid_data[0])
-        stride = (total_len - header_len) // vertex_count
-        
-        # Ensure divisible
-        if (total_len - header_len) % vertex_count != 0:
-            FreeFlowUtils.log("Warning: PLY data size mismatch. Skipping smoothing.", "WARN")
-            return
-            
-        T = len(valid_data)
-        if T < 5: return  # Need window
-        
+
+            with open(src, "rb") as f:
+                data = bytearray(f.read())
+
+            payload_len = len(data) - local_header_len
+            if payload_len <= 0 or payload_len % local_vertex_count != 0:
+                FreeFlowUtils.log(f"Invalid PLY payload for frame {fid:04d}: {src}", "WARN")
+                continue
+
+            local_stride = payload_len // local_vertex_count
+
+            if header_len is None:
+                header_len = local_header_len
+                vertex_count = local_vertex_count
+                stride = local_stride
+            elif local_header_len != header_len or local_vertex_count != vertex_count or local_stride != stride:
+                FreeFlowUtils.log(
+                    f"Layout mismatch for frame {fid:04d}; expected (hdr={header_len}, verts={vertex_count}, stride={stride}) "
+                    f"got (hdr={local_header_len}, verts={local_vertex_count}, stride={local_stride}). Skipping.",
+                    "WARN",
+                )
+                continue
+
+            valid_pairs.append((fid, src, dst))
+            all_data.append(data)
+
+        if not all_data:
+            FreeFlowUtils.log("No compatible frames available for post-processing.", "WARN")
+            return None
+
+        if header_len is None or vertex_count is None or stride is None:
+            FreeFlowUtils.log("Post-processing metadata could not be resolved.", "WARN")
+            return None
+
+        header_len = int(header_len)
+        vertex_count = int(vertex_count)
+        stride = int(stride)
+
+        T = len(all_data)
+        if do_smoothing and T < 4:
+            FreeFlowUtils.log("Smoothing skipped: need at least 4 valid frames.", "WARN")
+            return None
+
         points = np.zeros((T, vertex_count, 3), dtype=np.float32)
-        
-        for t, data in enumerate(valid_data):
-            # View raw bytes as flat uint8
+
+        for t, data in enumerate(all_data):
             raw_view = np.frombuffer(data, dtype=np.uint8, offset=header_len)
-            
-            # Reshape into (N, stride)
             reshaped = raw_view.reshape(vertex_count, stride)
-            
-            # Take first 12 bytes (3 floats)
             xyz_bytes = reshaped[:, :12]
-            
-            # View as floats
             xyz_floats = xyz_bytes.view(dtype=np.float32).reshape(vertex_count, 3)
-            
             points[t] = xyz_floats
-        
-        # TOPOLOGY REALIGNMENT (KD-Tree based)
-        # Fixes point ID shuffling from Brush by matching points incrementally
+
         if realign_topology:
             FreeFlowUtils.log("   🔧 Realigning topology using KD-Tree matching...")
             reorder_maps = self._compute_topology_realignment(points)
-            
-            # Apply reorder to both points array and raw data
+
             for t in range(T):
                 indices_map = reorder_maps[t]
-                
-                # Reorder points array
                 points[t] = points[t][indices_map]
-                
-                # Reorder the full PLY binary data (all properties, not just XYZ)
                 all_data[t] = self._reorder_ply_binary(all_data[t], indices_map, header_len, stride, vertex_count)
-            
+
             FreeFlowUtils.log(f"   ✅ Realigned {T} frames")
-            
-        # Apply Savitzky-Golay
-        # Smooth across Time (axis 0)
-        window_length = min(7, T if T % 2 == 1 else T-1)
-        if window_length < 3: window_length = 3
-        
-        smoothed = scipy.signal.savgol_filter(points, window_length=window_length, polyorder=2, axis=0)
-        
-        # Write back
-        for t, data in enumerate(valid_data):
+
+        points_to_write = points
+        if do_smoothing:
+            window_length = min(7, T if T % 2 == 1 else T - 1)
+            if window_length < 3:
+                window_length = 3
+            points_to_write = scipy.signal.savgol_filter(points, window_length=window_length, polyorder=2, axis=0)
+
+        for t, data in enumerate(all_data):
             raw_view = np.frombuffer(data, dtype=np.uint8, offset=header_len)
             reshaped = raw_view.reshape(vertex_count, stride)
-            
-            # Get target slice
             target_bytes = reshaped[:, :12]
-            
-            new_xyz = smoothed[t].astype(np.float32)
-            
-            # Cast new_xyz to uint8 view of shape (N, 12)
+
+            new_xyz = points_to_write[t].astype(np.float32)
             new_uint8 = new_xyz.view(np.uint8).reshape(vertex_count, 12)
-            
             np.copyto(target_bytes, new_uint8)
-            
-            # Save file to SMOOTHED folder (preserve originals!)
-            output_path = output_files[t]
-            if output_path:
-                with open(output_path, "wb") as f:
-                    f.write(data)
-                    
-        return True
+
+            output_path = valid_pairs[t][2]
+            with open(output_path, "wb") as f:
+                f.write(data)
+
+        return out_dir
 
     def _compute_topology_realignment(self, all_positions):
         """
@@ -1136,6 +1166,114 @@ class FreeFlow_GS_Engine:
             return int(nums[-1])  # Last number is typically the frame number
         return 0  # Fallback
 
+    def _is_checkpoint_dir(self, path: Path):
+        """Return True if path looks like a nerfstudio checkpoint directory."""
+        try:
+            p = Path(path)
+            return p.is_dir() and any(p.glob("step-*.ckpt"))
+        except Exception:
+            return False
+
+    def _read_anchor_checkpoint_metadata(self, metadata_path: Path, output_dir: Path):
+        """Read distributed anchor checkpoint metadata and resolve checkpoint directory."""
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+
+            # Prefer relative path for cross-machine shared roots
+            rel = meta.get("checkpoint_dir_rel")
+            if rel:
+                rel_candidate = output_dir / rel
+                if self._is_checkpoint_dir(rel_candidate):
+                    return rel_candidate
+
+            abs_path = meta.get("checkpoint_dir")
+            if abs_path:
+                abs_candidate = Path(os.path.expanduser(str(abs_path)))
+                if self._is_checkpoint_dir(abs_candidate):
+                    return abs_candidate
+        except Exception as e:
+            FreeFlowUtils.log(f"Failed reading anchor metadata {metadata_path.name}: {e}", "WARN")
+
+        return None
+
+    def _resolve_distributed_checkpoint_dir(self, output_dir: Path, target_anchor_id: int, distributed_anchor_path: str):
+        """
+        Resolve distributed Splatfacto anchor checkpoint directory.
+
+        Priority:
+        1) explicit distributed_anchor_path (checkpoint dir / .ckpt / metadata json)
+        2) output_dir/Distributed_Anchor/anchor_frame_XXXX.json metadata
+        """
+        explicit = str(distributed_anchor_path).strip()
+        if explicit:
+            p = Path(os.path.expanduser(explicit))
+
+            # direct checkpoint dir
+            if self._is_checkpoint_dir(p):
+                return p
+
+            # direct checkpoint file
+            if p.is_file() and p.suffix.lower() == ".ckpt" and p.parent.exists():
+                if self._is_checkpoint_dir(p.parent):
+                    return p.parent
+
+            # metadata json
+            if p.is_file() and p.suffix.lower() == ".json":
+                resolved = self._read_anchor_checkpoint_metadata(p, output_dir)
+                if resolved:
+                    return resolved
+
+            # directory containing metadata json
+            if p.is_dir():
+                metadata_file = p / f"anchor_frame_{target_anchor_id:04d}.json"
+                if metadata_file.exists():
+                    resolved = self._read_anchor_checkpoint_metadata(metadata_file, output_dir)
+                    if resolved:
+                        return resolved
+
+            FreeFlowUtils.log(
+                f"Distributed anchor path provided but not a valid checkpoint source for Splatfacto: {p}",
+                "WARN",
+            )
+
+        # default shared metadata location
+        default_meta = output_dir / "Distributed_Anchor" / f"anchor_frame_{target_anchor_id:04d}.json"
+        if default_meta.exists():
+            resolved = self._read_anchor_checkpoint_metadata(default_meta, output_dir)
+            if resolved:
+                return resolved
+
+        return None
+
+    def _save_anchor_checkpoint_metadata(self, distributed_dir: Path, output_dir: Path, frame_id: int, checkpoint_dir: Path):
+        """Write distributed anchor metadata containing checkpoint location."""
+        try:
+            distributed_dir.mkdir(parents=True, exist_ok=True)
+
+            ckpt_dir = Path(checkpoint_dir).resolve()
+            try:
+                ckpt_rel = os.path.relpath(str(ckpt_dir), str(output_dir.resolve()))
+            except Exception:
+                ckpt_rel = None
+
+            meta = {
+                "frame_id": int(frame_id),
+                "checkpoint_dir": str(ckpt_dir),
+                "checkpoint_dir_rel": ckpt_rel,
+                "created_at": int(time.time()),
+                "format_version": 1,
+            }
+
+            meta_path = distributed_dir / f"anchor_frame_{int(frame_id):04d}.json"
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+
+            return meta_path
+        except Exception as e:
+            FreeFlowUtils.log(f"Failed to save distributed anchor metadata: {e}", "WARN")
+            return None
+
     # ==================================================================================
     #   MAIN EXECUTION
     # ==================================================================================
@@ -1145,7 +1283,7 @@ class FreeFlow_GS_Engine:
                                guidance_mesh=None, topology_mode="Dynamic (Default-Flicker)",
                                apply_smoothing=False, realign_topology=True,
                                visualize_training="Off", preview_interval=500, eval_camera_index=10,
-                               iterations=4000, 
+                               iterations=6000, 
                                **kwargs):
         
         # Safety: handle if a saved workflow somehow passes a boolean
@@ -1233,6 +1371,8 @@ class FreeFlow_GS_Engine:
         if len(all_frame_numbers) != total_frames: all_frame_numbers = list(range(total_frames))
         
         indices_to_process = self._parse_frames(kwargs.get("frame_selection", "all"), all_frame_numbers)
+        if not indices_to_process:
+            raise ValueError("No valid frames selected for training.")
         
         # 5. State
         binding_data = None
@@ -1261,47 +1401,156 @@ class FreeFlow_GS_Engine:
             sparse_init_ply = output_dir / "sparse_init.ply"
             sparse_init_ply = self._export_sparse_to_ply(anchor_sparse, sparse_init_ply)
         
-        prev_ply = sparse_init_ply  # Use sparse init for first frame
-        
-        # Progress Bar Setup
-        total_steps_global = len(indices_to_process) * iterations
-        pbar = ProgressBar(total_steps_global) if ProgressBar else None
-        current_step_global = 0
-        
-        # Build mapping: list_index -> real_frame_id for anchor priority
-        first_cam = cameras[0]
-        index_to_real_frame = {}
-        for list_idx in indices_to_process:
-            if list_idx < len(multicam_feed[first_cam]):
-                real_id = self._extract_frame_number(multicam_feed[first_cam][list_idx])
+        # Default first-frame initialization source
+        prev_ply = sparse_init_ply
+
+        # Distributed anchor resolution
+        distributed_mode = "off"  # off | producer | consumer
+        distributed_anchor_source = None
+        distributed_anchor_checkpoint_dir = None
+        target_anchor_id = all_frame_numbers[indices_to_process[0]]
+
+        if distributed_anchor:
+            frame_str = str(distributed_anchor_frame).strip()
+            if frame_str:
+                if frame_str.isdigit():
+                    target_anchor_id = int(frame_str)
+                else:
+                    FreeFlowUtils.log(
+                        f"⚠️ Invalid distributed_anchor_frame='{distributed_anchor_frame}'. Using first selected frame as anchor.",
+                        "WARN",
+                    )
+
+            # Map real frame ID -> first list index in full sequence
+            real_to_list_index = {}
+            for list_idx, fid in enumerate(all_frame_numbers):
+                if fid not in real_to_list_index:
+                    real_to_list_index[fid] = list_idx
+            anchor_list_index = real_to_list_index.get(target_anchor_id)
+
+            if is_splatfacto:
+                # Splatfacto distributed mode uses checkpoint handoff (not PLY handoff)
+                distributed_anchor_checkpoint_dir = self._resolve_distributed_checkpoint_dir(
+                    output_dir, target_anchor_id, distributed_anchor_path
+                )
+
+                if distributed_anchor_checkpoint_dir:
+                    distributed_mode = "consumer"
+                    FreeFlowUtils.log(
+                        f"⚓ Distributed CONSUMER mode (Splatfacto checkpoint): {distributed_anchor_checkpoint_dir}",
+                        "INFO",
+                    )
+                    if hasattr(engine, "last_checkpoint_dir"):
+                        engine.last_checkpoint_dir = distributed_anchor_checkpoint_dir
+
+                    # If anchor frame is in selected range, process it first
+                    if anchor_list_index is not None and anchor_list_index in indices_to_process:
+                        if indices_to_process[0] != anchor_list_index:
+                            indices_to_process.remove(anchor_list_index)
+                            indices_to_process.insert(0, anchor_list_index)
+                            print(
+                                f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                            )
+                else:
+                    distributed_mode = "producer"
+                    FreeFlowUtils.log(
+                        f"⚓ Distributed PRODUCER mode: will generate anchor frame {target_anchor_id:04d}",
+                        "INFO",
+                    )
+
+                    # Ensure requested anchor frame is generated first
+                    if anchor_list_index is None:
+                        raise RuntimeError(
+                            f"Distributed anchor frame {target_anchor_id} not found in input sequence. "
+                            "Please choose an existing frame ID."
+                        )
+
+                    if anchor_list_index not in indices_to_process:
+                        indices_to_process.insert(0, anchor_list_index)
+                        print(
+                            f"   ⚓ Distributed Priority: Added Real Frame {target_anchor_id} (index {anchor_list_index}) as anchor at start."
+                        )
+                    elif indices_to_process[0] != anchor_list_index:
+                        indices_to_process.remove(anchor_list_index)
+                        indices_to_process.insert(0, anchor_list_index)
+                        print(
+                            f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                        )
             else:
-                real_id = list_idx  # Fallback
-            index_to_real_frame[list_idx] = real_id
-        
-        # Default: First frame of THIS batch (use its real frame ID)
-        target_anchor_id = index_to_real_frame[indices_to_process[0]]
-        
-        if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
-            target_anchor_id = int(distributed_anchor_frame.strip())
-            # Priority: Find which list_index corresponds to this real frame ID
-            anchor_list_index = None
-            for list_idx, real_id in index_to_real_frame.items():
-                if real_id == target_anchor_id:
-                    anchor_list_index = list_idx
-                    break
-            
-            if anchor_list_index is not None and anchor_list_index in indices_to_process:
-                indices_to_process.remove(anchor_list_index)
-                indices_to_process.insert(0, anchor_list_index)
-                print(f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue.")
-            else:
-                print(f"   ⚠️ Warning: Anchor frame {target_anchor_id} not found in selected frames. Using default anchor.")
+                # Brush/OpenSplat distributed mode uses PLY handoff
+                candidate_anchor_paths = []
+                if str(distributed_anchor_path).strip():
+                    candidate_anchor_paths.append(Path(os.path.expanduser(str(distributed_anchor_path).strip())))
+
+                default_anchor_path = output_dir / "Distributed_Anchor" / f"anchor_frame_{target_anchor_id:04d}.ply"
+                candidate_anchor_paths.append(default_anchor_path)
+
+                for candidate in candidate_anchor_paths:
+                    if candidate and candidate.exists():
+                        distributed_anchor_source = candidate
+                        break
+
+                if distributed_anchor_source:
+                    distributed_mode = "consumer"
+                    prev_ply = distributed_anchor_source
+                    FreeFlowUtils.log(
+                        f"⚓ Distributed CONSUMER mode: using existing anchor {distributed_anchor_source}",
+                        "INFO",
+                    )
+
+                    # If anchor frame is in selected range, process it first
+                    if anchor_list_index is not None and anchor_list_index in indices_to_process:
+                        if indices_to_process[0] != anchor_list_index:
+                            indices_to_process.remove(anchor_list_index)
+                            indices_to_process.insert(0, anchor_list_index)
+                            print(
+                                f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                            )
+                else:
+                    distributed_mode = "producer"
+                    FreeFlowUtils.log(
+                        f"⚓ Distributed PRODUCER mode: will generate anchor frame {target_anchor_id:04d}",
+                        "INFO",
+                    )
+
+                    # Ensure requested anchor frame is generated first
+                    if anchor_list_index is None:
+                        raise RuntimeError(
+                            f"Distributed anchor frame {target_anchor_id} not found in input sequence. "
+                            "Please choose an existing frame ID."
+                        )
+
+                    if anchor_list_index not in indices_to_process:
+                        indices_to_process.insert(0, anchor_list_index)
+                        print(
+                            f"   ⚓ Distributed Priority: Added Real Frame {target_anchor_id} (index {anchor_list_index}) as anchor at start."
+                        )
+                    elif indices_to_process[0] != anchor_list_index:
+                        indices_to_process.remove(anchor_list_index)
+                        indices_to_process.insert(0, anchor_list_index)
+                        print(
+                            f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                        )
         
         # Topology mode flag
         is_fixed_topology = "Fixed" in topology_mode
+
+        # Initial-frame quality overrides (Fixed mode only)
+        initial_iterations_override = int(kwargs.get("initial_iterations_override", 12000))
+        initial_quality_preset = kwargs.get("initial_quality_preset", "High (Recommended)")
+
+        # Consumer machines should continue from anchor checkpoint as-is (no first-frame densify boost)
+        initial_override_allowed = not (distributed_anchor and distributed_mode == "consumer")
+
+        # Progress Bar Setup (account for initial-frame iteration override)
+        total_steps_global = len(indices_to_process) * iterations
+        if is_fixed_topology and initial_override_allowed and initial_iterations_override > 0 and len(indices_to_process) > 0:
+            total_steps_global += (initial_iterations_override - iterations)
+        pbar = ProgressBar(total_steps_global) if ProgressBar else None
+        current_step_global = 0
         
-        # Track work directories for delayed cleanup (Splatfacto needs previous frame's data during export)
-        work_dirs_to_cleanup = []
+        # Rolling cleanup for Splatfacto: keep only latest frame work dir
+        last_splatfacto_work_dir = None
         
         # 6. Loop
         for idx_seq, i in enumerate(indices_to_process):
@@ -1335,22 +1584,10 @@ class FreeFlow_GS_Engine:
                 init_source_ply = prev_ply
                 init_mode = "Warm Start"
             
-            # 2. Check Distributed Anchor (Only if NOT warm starting)
-            elif distributed_anchor:
-                anchor_file = None
-                if distributed_anchor_path and Path(distributed_anchor_path).exists():
-                    anchor_file = Path(distributed_anchor_path)
-                else:
-                    # Auto-find: Look for any anchor_frame_*.ply in Distributed_Anchor folder
-                    anchor_dir = output_dir / "Distributed_Anchor"
-                    if anchor_dir.exists():
-                        anchor_candidates = list(anchor_dir.glob("anchor_frame_*.ply"))
-                        if anchor_candidates:
-                            anchor_file = anchor_candidates[0]  # Use first found
-                
-                if anchor_file:
-                    init_source_ply = anchor_file
-                    init_mode = f"Distributed Anchor ({anchor_file.name})"
+            # 2. Check resolved Distributed Anchor source (Only if NOT warm starting)
+            elif distributed_anchor_source and distributed_anchor_source.exists():
+                init_source_ply = distributed_anchor_source
+                init_mode = f"Distributed Anchor ({distributed_anchor_source.name})"
             
             # Perform Initialization Override
             if init_source_ply:
@@ -1380,12 +1617,23 @@ class FreeFlow_GS_Engine:
             # C. Execute Engine
             # Define frame_name early (used in params and callbacks)
             frame_name = f"{filename_prefix}_frame_{real_id:04d}"
+
+            is_initial_quality_frame = (
+                is_fixed_topology
+                and idx_seq == 0
+                and initial_override_allowed
+            )
+
+            frame_iterations = iterations
+            if is_initial_quality_frame and initial_iterations_override > 0:
+                frame_iterations = int(initial_iterations_override)
+                print(f"   ⭐ [Fixed Init Override] Frame {real_id}: iterations {iterations} -> {frame_iterations}")
             
             # Param dict construction with Fixed Topology CLI flags
             params = {
-                'iterations': iterations,
-                'splat_count': kwargs.get('splat_count', 50000),
-                'learning_rate': kwargs.get('learning_rate', 0.0005),
+                'iterations': frame_iterations,
+                'splat_count': kwargs.get('splat_count', 500000),
+                'learning_rate': kwargs.get('learning_rate', 0.00002),
                 'sh_degree': kwargs.get('sh_degree', 3),
             }
             
@@ -1443,12 +1691,12 @@ class FreeFlow_GS_Engine:
                 
                 params.update({
                     'splatfacto_variant': kwargs.get('splatfacto_variant', 'splatfacto'),
-                    'cull_alpha_thresh': kwargs.get('cull_alpha_thresh', 0.3),
-                    'densify_grad_thresh': kwargs.get('splatfacto_densify_grad_thresh', 0.0015),
+                    'cull_alpha_thresh': kwargs.get('cull_alpha_thresh', 0.22),
+                    'densify_grad_thresh': kwargs.get('splatfacto_densify_grad_thresh', 0.0012),
                     'use_scale_regularization': kwargs.get('use_scale_regularization', True),
-                    'refine_every': kwargs.get('refine_every', 150),
-                    'warmup_length': kwargs.get('warmup_length', 1000),
-                    'num_downscales': kwargs.get('num_downscales', 2),
+                    'refine_every': kwargs.get('refine_every', 120),
+                    'warmup_length': kwargs.get('warmup_length', 800),
+                    'num_downscales': kwargs.get('num_downscales', 1),
                     'cull_screen_size': kwargs.get('cull_screen_size', 0.15),
                     'split_screen_size': kwargs.get('split_screen_size', 0.05),
                     'sh_degree_interval': kwargs.get('sh_degree_interval', 1000),
@@ -1464,6 +1712,28 @@ class FreeFlow_GS_Engine:
                     'previews_dir': str(previews_dir),
                     'preview_callback': splatfacto_preview_callback,
                 })
+
+                # Fixed-mode initial quality preset (first frame only)
+                if is_initial_quality_frame:
+                    preset = str(initial_quality_preset)
+                    base_downscale = int(params.get('num_downscales', 1))
+                    if preset == "High (Recommended)":
+                        params['splatfacto_variant'] = 'splatfacto-big'
+                        params['refine_every'] = 100
+                        params['warmup_length'] = 700
+                        params['densify_grad_thresh'] = 0.0012
+                        params['num_downscales'] = max(base_downscale - 1, 0)
+                        params['cull_alpha_thresh'] = 0.22
+                        print("   ⭐ [Fixed Init Preset] High applied (variant=big, refine=100, warmup=700, densify=0.0012)")
+                    elif preset == "Extreme (Slow)":
+                        params['splatfacto_variant'] = 'splatfacto-big'
+                        params['refine_every'] = 80
+                        params['warmup_length'] = 500
+                        params['densify_grad_thresh'] = 0.0010
+                        params['num_downscales'] = 0
+                        params['cull_alpha_thresh'] = 0.20
+                        print("   ⭐ [Fixed Init Preset] Extreme applied (variant=big, refine=80, warmup=500, densify=0.0010)")
+
                 # Fixed topology for Splatfacto: lock immediately after anchor frame
                 # Frame 0: Establish topology (allow densification)
                 # Frame 1+: Lock topology (no further densification)
@@ -1513,9 +1783,8 @@ class FreeFlow_GS_Engine:
                 
                 # Add Fixed Topology CLI flags for Brush if enabled AND not first frame
                 # Frame 0: Establish topology (allow densification with defaults for max growth)
-                # Frame 1: Adapt from warm start (allow densification to adjust to new frame)
-                # Frame 2+: Fixed topology (lock to preserve established structure)
-                if is_fixed_topology and idx_seq > 1:
+                # Frame 1+: Fixed topology (lock to preserve established structure)
+                if is_fixed_topology and idx_seq > 0:
                     params['growth_stop_iter'] = 0  # Stop adding points immediately (no growth)
                     params['densification_interval'] = 999999  # Disable refinement (no split/clone/replace)
                     print(f"   🔒 [Fixed Topology] Frame {real_id}: Topology Locked (Strict Frozen Mode)")
@@ -1530,7 +1799,7 @@ class FreeFlow_GS_Engine:
                 print(f"   ⏱️ First frame - calibrating speed...")
             
             def pbar_update(proc):
-                self._pbar_simulator(pbar, iterations, seconds_per_step, current_step_global, proc, 
+                self._pbar_simulator(pbar, frame_iterations, seconds_per_step, current_step_global, proc, 
                                     idx_seq == 0, visualize_training, frame_name)
             
             callbacks = { 'pbar_func': pbar_update }
@@ -1637,16 +1906,32 @@ class FreeFlow_GS_Engine:
             if not success:
                 raise RuntimeError(f"Training failed for frame {real_id}")
             
-            current_step_global += iterations
+            current_step_global += frame_iterations
             
             # --- DISTRIBUTED: Save Anchor ---
-            if distributed_anchor and real_id == target_anchor_id and ply_out.exists():
+            if distributed_anchor and distributed_mode == "producer" and real_id == target_anchor_id and ply_out.exists():
                 distributed_dir = output_dir / "Distributed_Anchor"
                 distributed_dir.mkdir(exist_ok=True)
                 anchor_filename = f"anchor_frame_{real_id:04d}.ply"
                 anchor_dst = distributed_dir / anchor_filename
                 shutil.copy(str(ply_out), str(anchor_dst))
                 print(f"   ⚓ Saved Distributed Anchor to: {anchor_dst}")
+
+                # For Splatfacto distributed workflows, also save checkpoint metadata.
+                if is_splatfacto and hasattr(engine, "last_checkpoint_dir") and engine.last_checkpoint_dir:
+                    meta_path = self._save_anchor_checkpoint_metadata(
+                        distributed_dir,
+                        output_dir,
+                        real_id,
+                        Path(engine.last_checkpoint_dir),
+                    )
+                    if meta_path:
+                        print(f"   ⚓ Saved Distributed Checkpoint Metadata to: {meta_path}")
+                elif is_splatfacto:
+                    FreeFlowUtils.log(
+                        "⚠️ Distributed anchor checkpoint metadata not saved: checkpoint dir unavailable.",
+                        "WARN",
+                    )
 
             # --- WARMUP LOGIC ---
             is_warmup = (idx_seq < warmup_frames)
@@ -1674,38 +1959,70 @@ class FreeFlow_GS_Engine:
             # Cleanup
             if kwargs.get("cleanup_work_dirs", True):
                 if is_splatfacto:
-                    # Delay cleanup until all frames complete (ns-export may need previous frame's data)
-                    work_dirs_to_cleanup.append(frame_work_dir)
+                    # Keep only one Splatfacto work dir at a time (latest frame).
+                    # Safe because training/export for current frame already finished.
+                    if last_splatfacto_work_dir and last_splatfacto_work_dir != frame_work_dir:
+                        try:
+                            shutil.rmtree(last_splatfacto_work_dir, ignore_errors=True)
+                            print(f"   🗑️  Cleaned: {last_splatfacto_work_dir.name}")
+                        except Exception as e:
+                            print(f"   ⚠️  Failed to clean {last_splatfacto_work_dir.name}: {e}")
+                    last_splatfacto_work_dir = frame_work_dir
                 else:
                     # Brush/OpenSplat: cleanup immediately as usual
                     shutil.rmtree(frame_work_dir, ignore_errors=True)
 
-        # Cleanup Splatfacto work directories after all frames complete
-        # This must happen AFTER the loop so ns-export can access previous frame data for warm start
-        cleanup_enabled = kwargs.get("cleanup_work_dirs", True)
-        if is_splatfacto and work_dirs_to_cleanup and cleanup_enabled:
-            FreeFlowUtils.log(f"🧹 Cleaning up {len(work_dirs_to_cleanup)} Splatfacto work directories...")
-            for work_dir in work_dirs_to_cleanup:
-                try:
-                    shutil.rmtree(work_dir, ignore_errors=True)
-                    print(f"   🗑️  Cleaned: {work_dir.name}")
-                except Exception as e:
-                    print(f"   ⚠️  Failed to clean {work_dir.name}: {e}")
+        # --- POST-PROCESS: REALIGNMENT & SMOOTHING (Stable) ---
+        realigned_dir = None
+        smoothed_dir = None
 
-        # --- POST-PROCESS: TEMPORAL SMOOTHING (Stable) ---
-        if apply_smoothing:
-            if is_fixed_topology and len(indices_to_process) > 3:
-                FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
+        if is_fixed_topology:
+            if realign_topology:
+                FreeFlowUtils.log("🔗 Running Topology Realignment...")
                 try:
-                    self._apply_temporal_smoothing(output_dir, filename_prefix, indices_to_process, multicam_feed, cameras, realign_topology)
-                    FreeFlowUtils.log("✅ Smoothing Complete!")
+                    realigned_dir = self._apply_temporal_smoothing(
+                        output_dir,
+                        filename_prefix,
+                        indices_to_process,
+                        multicam_feed,
+                        cameras,
+                        realign_topology=True,
+                        do_smoothing=False,
+                        source_dir=output_dir,
+                        out_subdir="realigned",
+                    )
+                    if realigned_dir:
+                        FreeFlowUtils.log(f"✅ Realignment Complete! Saved to: {realigned_dir}")
                 except Exception as e:
-                    FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
-            else:
-                if not is_fixed_topology:
-                    FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology used.", "WARN")
+                    FreeFlowUtils.log(f"Realignment failed: {e}", "WARN")
+
+            if apply_smoothing:
+                if len(indices_to_process) > 3:
+                    FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
+                    try:
+                        smoothing_source = realigned_dir if realigned_dir else output_dir
+                        smoothed_dir = self._apply_temporal_smoothing(
+                            output_dir,
+                            filename_prefix,
+                            indices_to_process,
+                            multicam_feed,
+                            cameras,
+                            realign_topology=False,  # Avoid double-realignment when smoothing from realigned source
+                            do_smoothing=True,
+                            source_dir=smoothing_source,
+                            out_subdir="smoothed",
+                        )
+                        if smoothed_dir:
+                            FreeFlowUtils.log(f"✅ Smoothing Complete! Saved to: {smoothed_dir}")
+                    except Exception as e:
+                        FreeFlowUtils.log(f"Smoothing failed: {e}", "WARN")
                 else:
                     FreeFlowUtils.log("⚠️ Smoothing skipped: Sequence too short (<4 frames).", "WARN")
+        else:
+            if realign_topology:
+                FreeFlowUtils.log("⚠️ Realignment skipped: Requires 'Fixed (Stable)' topology.", "WARN")
+            if apply_smoothing:
+                FreeFlowUtils.log("⚠️ Smoothing skipped: Requires 'Fixed (Stable)' topology.", "WARN")
 
         FreeFlowUtils.log("=" * 50)
         FreeFlowUtils.log(f"✅ Training Complete! Output: {output_dir}")

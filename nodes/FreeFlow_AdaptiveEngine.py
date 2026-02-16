@@ -75,7 +75,7 @@ class FreeFlow_AdaptiveEngine:
                 # --- 6. Initialization & Selection ---
                 "frame_selection": ("STRING", {"default": "all", "multiline": False, "tooltip": "Which frames to process. Examples: 'all', '0-50', '0,5,10,15', '100-200'. Useful for testing or distributed rendering."}),
                 "init_from_sparse": ("BOOLEAN", {"default": True, "tooltip": "Initialize first frame from COLMAP sparse point cloud. Essential for correct 3D scale and camera alignment. Only disable for testing."}),
-                "masking_method": (["Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "Optical Flow (Robust)", "tooltip": "How to detect motion between frames. Optical Flow: accurate but slower. Simple Diff: fast but may flicker on subtle motion."}),
+                "masking_method": (["None (No Masking)", "Optical Flow (Robust)", "Simple Diff (Fast)"], {"default": "None (No Masking)", "tooltip": "How to detect motion between frames. None disables masking. Optical Flow: accurate but slower. Simple Diff: fast but may flicker on subtle motion."}),
                 "motion_sensitivity": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.1, "tooltip": "How aggressively to mask static areas. 0=no masking. 1=mask everything static. 0.3 is safe default to prevent background 'swimming'."}),
                 
                 # --- 7. Output & Storage ---
@@ -338,7 +338,7 @@ class FreeFlow_AdaptiveEngine:
                                 
                                 mask_dir = frame_work_dir / "masks"
                                 mask_dir.mkdir(exist_ok=True)
-                                dst_mask = mask_dir / f"{dst_name}.png" # Must match image name usually
+                                dst_mask = mask_dir / f"{Path(dst_name).stem}.png" # Must match image stem with .png suffix
                                 shutil.move(str(generated_mask), dst_mask)
                                 
                                 # We don't modify the image alpha, we provide sidecar mask.
@@ -370,11 +370,11 @@ class FreeFlow_AdaptiveEngine:
     def adapt_flow(self, multicam_feed, colmap_anchor, splat_count, sh_degree,
                    topology_mode="Dynamic (Default-Flicker)", apply_smoothing=False,
                    visualize_training="Off", preview_interval=500, eval_camera_index=10,
-                   iterations=10000, learning_rate=0.0005, densification_interval=300,
-                   densify_grad_threshold=0.0002, growth_select_fraction=0.1,
+                   iterations=30000, learning_rate=0.00002, densification_interval=200,
+                   densify_grad_threshold=0.00015, growth_select_fraction=0.12,
                    feature_lr=0.0025, gaussian_lr=0.0003, opacity_lr=0.01, scale_loss_weight=1e-8,
-                   frame_selection="all", init_from_sparse=True, masking_method="Optical Flow (Robust)", motion_sensitivity=0.3,
-                   custom_output_path="", filename_prefix="FreeFlow", use_symlinks=True, cleanup_work_dirs=True,
+                   frame_selection="all", init_from_sparse=True, masking_method="None (No Masking)", motion_sensitivity=0.3,
+                   custom_output_path="", filename_prefix="FreeFlow_Splat", use_symlinks=True, cleanup_work_dirs=True,
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
                    unique_id=None, preview_camera_filter=""):
         """
@@ -405,8 +405,13 @@ class FreeFlow_AdaptiveEngine:
              raise FileNotFoundError("Brush binary not found and auto-install failed. Please check internet connection or install manually.")
 
         # Initialize Components
-        from .modules.motion_masking import MotionMasking
-        mask_engine = MotionMasking(sensitivity=motion_sensitivity)
+        if masking_method == "None (No Masking)":
+            mask_engine = None
+            FreeFlowUtils.log("Masking: Disabled (No Masking)", "INFO")
+        else:
+            from .modules.motion_masking import MotionMasking
+            mask_engine = MotionMasking(sensitivity=motion_sensitivity)
+            FreeFlowUtils.log(f"Masking: {masking_method} (sensitivity={motion_sensitivity})", "INFO")
         
         # Get camera list and TOTAL frame count
         cameras = list(multicam_feed.keys())
@@ -414,6 +419,8 @@ class FreeFlow_AdaptiveEngine:
         
         # PARSE FRAME SELECTION
         indices_to_process = self._parse_frames(frame_selection, total_frames)
+        if not indices_to_process:
+            raise ValueError("No valid frames selected for training.")
         
         FreeFlowUtils.log("=" * 50)
         FreeFlowUtils.log("FreeFlow Adaptive Engine - Starting 4D Generation")
@@ -432,7 +439,11 @@ class FreeFlow_AdaptiveEngine:
             sparse_init_ply = output_dir / "sparse_init.ply"
             sparse_init_ply = self._export_sparse_to_ply(anchor_sparse, sparse_init_ply)
 
-        prev_ply = sparse_init_ply  # Use sparse init for first frame
+        prev_ply = sparse_init_ply  # Default first-frame init
+
+        # Distributed anchor resolution
+        distributed_mode = "off"  # off | producer | consumer
+        distributed_anchor_source = None
 
         # Keep track of previous images for masking
         # NOTE: For masking to work well with skipped frames, we should arguably compare to 
@@ -453,47 +464,104 @@ class FreeFlow_AdaptiveEngine:
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
 
-        # Build mapping: list_index -> real_frame_id for anchor priority
+        # Build real frame-ID map for anchor resolution
         first_cam = cameras[0]
-        index_to_real_frame = {}
-        for list_idx in indices_to_process:
-            if list_idx < len(multicam_feed[first_cam]):
-                real_id = self._extract_frame_number(multicam_feed[first_cam][list_idx])
-            else:
-                real_id = list_idx  # Fallback
-            index_to_real_frame[list_idx] = real_id
-        
-        # Default: First frame of THIS batch (use its real frame ID)
-        target_anchor_id = index_to_real_frame[indices_to_process[0]]
-        
-        if distributed_anchor and distributed_anchor_frame and distributed_anchor_frame.strip().isdigit():
-            target_anchor_id = int(distributed_anchor_frame.strip())
-            # Priority: Find which list_index corresponds to this real frame ID
-            anchor_list_index = None
-            for list_idx, real_id in index_to_real_frame.items():
-                if real_id == target_anchor_id:
-                    anchor_list_index = list_idx
+        all_frame_numbers = []
+        for list_idx in range(len(multicam_feed[first_cam])):
+            all_frame_numbers.append(self._extract_frame_number(multicam_feed[first_cam][list_idx]))
+
+        # Default anchor: first selected frame in this run
+        target_anchor_id = all_frame_numbers[indices_to_process[0]] if indices_to_process else 0
+
+        if distributed_anchor:
+            frame_str = str(distributed_anchor_frame).strip()
+            if frame_str:
+                if frame_str.isdigit():
+                    target_anchor_id = int(frame_str)
+                else:
+                    FreeFlowUtils.log(
+                        f"⚠️ Invalid distributed_anchor_frame='{distributed_anchor_frame}'. Using first selected frame as anchor.",
+                        "WARN",
+                    )
+
+            # Map real frame ID -> first list index in full sequence
+            real_to_list_index = {}
+            for list_idx, fid in enumerate(all_frame_numbers):
+                if fid not in real_to_list_index:
+                    real_to_list_index[fid] = list_idx
+            anchor_list_index = real_to_list_index.get(target_anchor_id)
+
+            # Resolve existing anchor path (consumer mode)
+            candidate_anchor_paths = []
+            if str(distributed_anchor_path).strip():
+                candidate_anchor_paths.append(Path(os.path.expanduser(str(distributed_anchor_path).strip())))
+
+            default_anchor_path = output_dir / "Distributed_Anchor" / f"anchor_frame_{target_anchor_id:04d}.ply"
+            candidate_anchor_paths.append(default_anchor_path)
+
+            for candidate in candidate_anchor_paths:
+                if candidate and candidate.exists():
+                    distributed_anchor_source = candidate
                     break
-            
-            if anchor_list_index is not None and anchor_list_index in indices_to_process:
-                indices_to_process.remove(anchor_list_index)
-                indices_to_process.insert(0, anchor_list_index)
-                print(f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue.")
+
+            if distributed_anchor_source:
+                distributed_mode = "consumer"
+                prev_ply = distributed_anchor_source
+                FreeFlowUtils.log(
+                    f"⚓ Distributed CONSUMER mode: using existing anchor {distributed_anchor_source}",
+                    "INFO",
+                )
+
+                # If anchor frame is in selected range, move it first
+                if anchor_list_index is not None and anchor_list_index in indices_to_process:
+                    if indices_to_process[0] != anchor_list_index:
+                        indices_to_process.remove(anchor_list_index)
+                        indices_to_process.insert(0, anchor_list_index)
+                        print(
+                            f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                        )
             else:
-                print(f"   ⚠️ Warning: Anchor frame {target_anchor_id} not found in selected frames. Using default anchor.")
+                distributed_mode = "producer"
+                FreeFlowUtils.log(
+                    f"⚓ Distributed PRODUCER mode: will generate anchor frame {target_anchor_id:04d}",
+                    "INFO",
+                )
+
+                # Ensure requested anchor frame is generated first
+                if anchor_list_index is None:
+                    raise RuntimeError(
+                        f"Distributed anchor frame {target_anchor_id} not found in input sequence. "
+                        "Please choose an existing frame ID."
+                    )
+
+                if anchor_list_index not in indices_to_process:
+                    indices_to_process.insert(0, anchor_list_index)
+                    print(
+                        f"   ⚓ Distributed Priority: Added Real Frame {target_anchor_id} (index {anchor_list_index}) as anchor at start."
+                    )
+                elif indices_to_process[0] != anchor_list_index:
+                    indices_to_process.remove(anchor_list_index)
+                    indices_to_process.insert(0, anchor_list_index)
+                    print(
+                        f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
+                    )
         
         # -------------------------
+
+        # Recompute progress totals after distributed anchor reordering/insertion
+        total_steps_global = len(indices_to_process) * iterations
+        pbar = ProgressBar(total_steps_global) if ProgressBar else None
+        current_step_global = 0
         
         # Pre-calculate topology mode (used in loop and after)
         is_fixed_topology = "Fixed" in topology_mode
 
         for idx, i in enumerate(indices_to_process):
-            # Get REAL frame number from actual image filename (not list index!)
-            first_cam = cameras[0]
-            if i < len(multicam_feed[first_cam]):
-                real_frame_id = self._extract_frame_number(multicam_feed[first_cam][i])
+            # Get REAL frame number from precomputed mapping
+            if i < len(all_frame_numbers):
+                real_frame_id = all_frame_numbers[i]
             else:
-                real_frame_id = i  # Fallback to index if out of bounds
+                real_frame_id = i
             
             frame_work_dir = output_dir / f"frame_{real_frame_id:04d}_work"
             ply_out = output_dir / f"{filename_prefix}_frame_{real_frame_id:04d}.ply"
@@ -518,23 +586,10 @@ class FreeFlow_AdaptiveEngine:
                 init_source_ply = prev_ply
                 init_mode = "Warm Start"
             
-            # 2. Check Distributed Anchor (Only if NOT warm starting)
-            elif distributed_anchor:
-                 # Check Path OR Auto-Find anchor in folder
-                 anchor_file = None
-                 if distributed_anchor_path and Path(distributed_anchor_path).exists():
-                     anchor_file = Path(distributed_anchor_path)
-                 else:
-                     # Auto-find: Look for any anchor_frame_*.ply in Distributed_Anchor folder
-                     anchor_dir = output_dir / "Distributed_Anchor"
-                     if anchor_dir.exists():
-                         anchor_candidates = list(anchor_dir.glob("anchor_frame_*.ply"))
-                         if anchor_candidates:
-                             anchor_file = anchor_candidates[0]  # Use first found
-                 
-                 if anchor_file:
-                     init_source_ply = anchor_file
-                     init_mode = f"Distributed Anchor ({anchor_file.name})"
+            # 2. Check resolved Distributed Anchor source (Only if NOT warm starting)
+            elif distributed_anchor_source and distributed_anchor_source.exists():
+                 init_source_ply = distributed_anchor_source
+                 init_mode = f"Distributed Anchor ({distributed_anchor_source.name})"
             
             # Perform Initialization Override
             if init_source_ply:
@@ -726,7 +781,7 @@ class FreeFlow_AdaptiveEngine:
 
             # --- DISTRIBUTED: Save Anchor ---
             # Save IF: Distributed Enabled AND Current Frame is the Target Anchor
-            if distributed_anchor and real_frame_id == target_anchor_id and ply_out.exists():
+            if distributed_anchor and distributed_mode == "producer" and real_frame_id == target_anchor_id and ply_out.exists():
                 distributed_dir = output_dir / "Distributed_Anchor"
                 distributed_dir.mkdir(exist_ok=True)
                 # Use REAL frame ID for anchor filename (not list index)
@@ -1401,6 +1456,3 @@ class FreeFlow_AdaptiveEngine:
                 self._cached_seconds_per_step = 0.7 * self._cached_seconds_per_step + 0.3 * new_rate
             else:
                 self._cached_seconds_per_step = new_rate
-
-
-

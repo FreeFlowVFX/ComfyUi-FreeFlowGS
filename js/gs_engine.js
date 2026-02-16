@@ -33,6 +33,9 @@ app.registerExtension({
                 // Visualization widget (needed for filtering options and visibility)
                 const vizWidget = findWidget("visualize_training");
 
+                // Masking controller (motion_sensitivity depends on this)
+                const maskingMethodWidget = findWidget("masking_method");
+
                 // --- Preview params (Brush + Save Preview mode only) ---
                 const previewParams = [
                     "preview_interval"
@@ -84,7 +87,9 @@ app.registerExtension({
                 const topoWidget = findWidget("topology_mode");
                 const fixedTopoParams = [
                     "realign_topology",
-                    "apply_smoothing"
+                    "apply_smoothing",
+                    "initial_iterations_override",
+                    "initial_quality_preset"
                 ];
 
                 // --- Distributed params (show when enabled) ---
@@ -129,6 +134,7 @@ app.registerExtension({
                         currentVals["visualize_training"] = "Off";
                         currentVals["topology_mode"] = "Dynamic (Default-Flicker)";
                         currentVals["distributed_anchor"] = false;
+                        currentVals["masking_method"] = "None (No Masking)";
 
                         for (const w of this._freeflow_all_widgets) {
                             const engine = currentVals["engine_backend"];
@@ -139,8 +145,14 @@ app.registerExtension({
                             const dist = currentVals["distributed_anchor"];
 
                             let visible = true;
-                            if (maskingParams.includes(w.name)) {
-                                visible = true; // Always visible for all engines
+                            if (w.name === "masking_method") {
+                                visible = true;
+                            } else if (w.name === "motion_sensitivity") {
+                                visible = (currentVals["masking_method"] !== "None (No Masking)");
+                            } else if (w.name === "initial_quality_preset") {
+                                visible = (topo && topo.includes("Fixed")) && isSplatfacto;
+                            } else if (maskingParams.includes(w.name)) {
+                                visible = true;
                             } else if (brushParams.includes(w.name)) {
                                 visible = isBrush;
                             } else if (splatfactoParams.includes(w.name)) {
@@ -220,13 +232,25 @@ app.registerExtension({
                         const topoMode = topoWidget ? topoWidget.value : "";
                         const isFixedTopo = (topoMode && topoMode.includes("Fixed"));
 
+                        const maskingMode = maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)";
+                        const showMotionSensitivity = maskingMode !== "None (No Masking)";
+
                         const showDistributed = distributedWidget ? distributedWidget.value : false;
 
                         // Filter widgets based on current state
                         this.widgets = allWidgets.filter(w => {
                             // --- Masking params (show for ALL engines) ---
+                            if (w.name === "masking_method") {
+                                return true;
+                            }
+                            if (w.name === "motion_sensitivity") {
+                                return showMotionSensitivity;
+                            }
+                            if (w.name === "initial_quality_preset") {
+                                return isFixedTopo && isSplatfacto;
+                            }
                             if (maskingParams.includes(w.name)) {
-                                return true; // Always visible for all engines
+                                return true;
                             }
 
                             // --- Engine-specific params ---
@@ -284,6 +308,9 @@ app.registerExtension({
                 }
                 if (distributedWidget) {
                     distributedWidget.callback = () => updateVisibility();
+                }
+                if (maskingMethodWidget) {
+                    maskingMethodWidget.callback = () => updateVisibility();
                 }
 
                 // Initial visibility update

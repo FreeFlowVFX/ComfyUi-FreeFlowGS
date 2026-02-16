@@ -220,12 +220,12 @@ class SplatfactoEngine(IGSEngine):
         # max_gs_num was added in newer versions (MCMC support) — pass conditionally.
         cmd.extend([
             f"--pipeline.model.sh_degree={params.get('sh_degree', 3)}",
-            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.3)}",
-            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0015)}",
+            f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.22)}",
+            f"--pipeline.model.densify_grad_thresh={params.get('densify_grad_thresh', 0.0012)}",
             f"--pipeline.model.use_scale_regularization={bool_str(params.get('use_scale_regularization', True))}",
-            f"--pipeline.model.refine_every={params.get('refine_every', 150)}",
-            f"--pipeline.model.warmup_length={params.get('warmup_length', 1000)}",
-            f"--pipeline.model.num_downscales={params.get('num_downscales', 2)}",
+            f"--pipeline.model.refine_every={params.get('refine_every', 120)}",
+            f"--pipeline.model.warmup_length={params.get('warmup_length', 800)}",
+            f"--pipeline.model.num_downscales={params.get('num_downscales', 1)}",
             f"--pipeline.model.cull_screen_size={params.get('cull_screen_size', 0.15)}",
             f"--pipeline.model.split_screen_size={params.get('split_screen_size', 0.05)}",
             f"--pipeline.model.sh_degree_interval={params.get('sh_degree_interval', 1000)}",

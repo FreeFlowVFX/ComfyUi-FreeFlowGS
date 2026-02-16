@@ -17,6 +17,7 @@ app.registerExtension({
                 const filterWidget = findWidget("preview_camera_filter");
                 const evalCameraWidget = findWidget("eval_camera_index"); // Camera index selector
                 const topoWidget = findWidget("topology_mode");
+                const maskingMethodWidget = findWidget("masking_method");
 
                 const createAnchorWidget = findWidget("distributed_anchor");
                 const anchorPathWidget = findWidget("distributed_anchor_path");
@@ -55,6 +56,7 @@ app.registerExtension({
                         currentVals["visualize_training"] = "Off";
                         currentVals["topology_mode"] = "Dynamic (Default-Flicker)";
                         currentVals["distributed_anchor"] = false;
+                        currentVals["masking_method"] = "None (No Masking)";
 
                         for (const w of this._freeflow_all_widgets) {
                             // Standard Visibility Logic (Must match updateVisibility)
@@ -65,6 +67,8 @@ app.registerExtension({
                             let visible = true;
                             if (w.name === "preview_interval" || w.name === "preview_camera_filter" || w.name === "eval_camera_index") {
                                 visible = (viz === "Save Preview Images");
+                            } else if (w.name === "motion_sensitivity") {
+                                visible = (currentVals["masking_method"] !== "None (No Masking)");
                             } else if (w.name === "apply_smoothing") {
                                 visible = (topo && topo.includes("Fixed"));
                             } else if (w.name === "distributed_anchor_path" || w.name === "distributed_anchor_frame" || w.name === "warmup_frames") {
@@ -99,11 +103,16 @@ app.registerExtension({
                     // 3. Distributed Controls Visibility
                     const showDistributed = createAnchorWidget ? createAnchorWidget.value : false;
 
+                    // 4. Masking sensitivity visibility
+                    const maskingMode = maskingMethodWidget ? maskingMethodWidget.value : "None (No Masking)";
+                    const showMotionSensitivity = (maskingMode !== "None (No Masking)");
+
                     // Filter widgets based on conditions
                     this.widgets = allWidgets.filter(w => {
                         if (w.name === "preview_interval") return showPreviewControls;
                         if (w.name === "preview_camera_filter") return showPreviewControls;
                         if (w.name === "eval_camera_index") return showPreviewControls;
+                        if (w.name === "motion_sensitivity") return showMotionSensitivity;
                         if (w.name === "apply_smoothing") return showSmoothing;
                         if (w.name === "distributed_anchor_path") return showDistributed;
                         if (w.name === "distributed_anchor_frame") return showDistributed;
@@ -131,6 +140,12 @@ app.registerExtension({
 
                 if (createAnchorWidget) {
                     createAnchorWidget.callback = () => {
+                        updateVisibility();
+                    };
+                }
+
+                if (maskingMethodWidget) {
+                    maskingMethodWidget.callback = () => {
                         updateVisibility();
                     };
                 }
