@@ -114,6 +114,16 @@ class FreeFlow_GS_Engine:
                     "tooltip": " ".join(tooltip_parts)
                 }),
 
+                # --- Splatfacto quick selectors (shown only for Splatfacto backend) ---
+                "splatfacto_variant": (["splatfacto", "splatfacto-big", "splatfacto-w"], {
+                    "default": "splatfacto",
+                    "tooltip": "Splatfacto model type. splatfacto is balanced, big is higher quality/cost, w adds appearance embedding for lighting variation."
+                }),
+                "splatfacto_viewer": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Open Splatfacto's live viewer in browser during training. Useful for inspection, adds overhead."
+                }),
+
                 # ═══════════════════════════════════════════════════════════════
                 # CINEMA GUIDANCE (Optional mesh-based initialization)
                 # ═══════════════════════════════════════════════════════════════
@@ -222,14 +232,6 @@ class FreeFlow_GS_Engine:
                 # ═══════════════════════════════════════════════════════════════
                 # SPLATFACTO-SPECIFIC PARAMETERS
                 # ═══════════════════════════════════════════════════════════════
-                "splatfacto_variant": (["splatfacto", "splatfacto-big", "splatfacto-w"], {
-                    "default": "splatfacto",
-                    "tooltip": "Splatfacto model type. splatfacto is balanced, big is higher quality/cost, w adds appearance embedding for lighting variation."
-                }),
-                "splatfacto_viewer": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Open Splatfacto's live viewer in browser during training. Useful for inspection, adds overhead."
-                }),
                 "cull_alpha_thresh": ("FLOAT", {
                     "default": 0.3, "min": 0.001, "max": 0.5, "step": 0.001,
                     "tooltip": "Splatfacto opacity culling threshold. Higher removes more dark/transparent junk splats. Lower keeps more faint detail."
