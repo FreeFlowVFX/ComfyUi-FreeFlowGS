@@ -68,7 +68,7 @@ class FreeFlow_AdaptiveEngine:
                 
                 # --- Learning Rates ---
                 "feature_lr": ("FLOAT", {"default": 0.0025, "min": 0.0001, "max": 0.05, "step": 0.0001, "tooltip": "Controls how fast splat COLORS update. Set low (0.0025) for stable colors across frames. Higher values may cause color flickering."}),
-                "gaussian_lr": ("FLOAT", {"default": 0.0003, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. 0.0003 optimized for film: faster convergence than ultra-low values while maintaining 4D stability."}),
+                "gaussian_lr": ("FLOAT", {"default": 0.007, "min": 0.00001, "max": 0.1, "step": 0.00001, "tooltip": "Controls how fast splat SIZE/SHAPE updates. Maps to Brush --lr-scale. Production-ready range is typically 0.005-0.01. Too low can appear frozen; too high can stretch splats."}),
                 "opacity_lr": ("FLOAT", {"default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001, "tooltip": "Learning rate for opacity values. Controls how fast transparency updates. Lower = more stable opacity."}),
                 "scale_loss_weight": ("FLOAT", {"default": 1e-8, "min": 0.0, "max": 1e-5, "step": 1e-9, "tooltip": "Regularization weight for scale loss. Higher values constrain splat sizes. Helps prevent overly large splats."}),
                 
@@ -88,7 +88,7 @@ class FreeFlow_AdaptiveEngine:
                 "distributed_anchor": ("BOOLEAN", {"default": False, "tooltip": "Enable for multi-machine rendering. Saves Frame 0 as shared anchor so all machines start from identical point cloud."}),
                 "distributed_anchor_path": ("STRING", {"default": "", "multiline": False, "placeholder": "path/to/anchor.ply (Empty = Auto)", "tooltip": "Path to load a pre-trained anchor PLY. Leave empty to auto-generate from Frame 0. Use for consistent multi-machine runs."}),
                 "distributed_anchor_frame": ("STRING", {"default": "", "multiline": False, "placeholder": "Frame Number e.g. 0 (Empty = First Frame)", "tooltip": "Which frame number to use as anchor. Leave empty to use the first frame in your selection."}),
-                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 1000, "tooltip": "Train N frames without saving output. Use for overlapping frame ranges in distributed mode to ensure smooth transitions."}),
+                "warmup_frames": ("INT", {"default": 0, "min": 0, "max": 1000, "tooltip": "Use up to N pre-roll frames BEFORE the selected range as warmup. Main selected frames are preserved; anchor frame is never treated as warmup."}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -372,7 +372,7 @@ class FreeFlow_AdaptiveEngine:
                    visualize_training="Off", preview_interval=500, eval_camera_index=10,
                    iterations=30000, learning_rate=0.00002, densification_interval=200,
                    densify_grad_threshold=0.00015, growth_select_fraction=0.12,
-                   feature_lr=0.0025, gaussian_lr=0.0003, opacity_lr=0.01, scale_loss_weight=1e-8,
+                   feature_lr=0.0025, gaussian_lr=0.007, opacity_lr=0.01, scale_loss_weight=1e-8,
                    frame_selection="all", init_from_sparse=True, masking_method="None (No Masking)", motion_sensitivity=0.3,
                    custom_output_path="", filename_prefix="FreeFlow_Splat", use_symlinks=True, cleanup_work_dirs=True,
                    distributed_anchor=False, distributed_anchor_path="", distributed_anchor_frame="", warmup_frames=0, # Distributed params
@@ -421,6 +421,7 @@ class FreeFlow_AdaptiveEngine:
         indices_to_process = self._parse_frames(frame_selection, total_frames)
         if not indices_to_process:
             raise ValueError("No valid frames selected for training.")
+        base_selected_indices = list(indices_to_process)
         
         FreeFlowUtils.log("=" * 50)
         FreeFlowUtils.log("FreeFlow Adaptive Engine - Starting 4D Generation")
@@ -444,6 +445,7 @@ class FreeFlow_AdaptiveEngine:
         # Distributed anchor resolution
         distributed_mode = "off"  # off | producer | consumer
         distributed_anchor_source = None
+        anchor_list_index = None
 
         # Keep track of previous images for masking
         # NOTE: For masking to work well with skipped frames, we should arguably compare to 
@@ -548,7 +550,34 @@ class FreeFlow_AdaptiveEngine:
         
         # -------------------------
 
-        # Recompute progress totals after distributed anchor reordering/insertion
+        # Build warmup pre-roll from frames BEFORE the selected main range.
+        warmup_pre_indices = []
+        if warmup_frames > 0 and base_selected_indices:
+            first_main_idx = min(base_selected_indices)
+            warmup_start_idx = max(0, first_main_idx - int(warmup_frames))
+            warmup_pre_indices = list(range(warmup_start_idx, first_main_idx))
+
+        # Never treat anchor as warmup
+        if distributed_anchor and anchor_list_index is not None and anchor_list_index in warmup_pre_indices:
+            warmup_pre_indices = [idx for idx in warmup_pre_indices if idx != anchor_list_index]
+
+        warmup_pre_set = set(warmup_pre_indices)
+        main_processing_indices = [idx for idx in indices_to_process if idx not in warmup_pre_set]
+        if not main_processing_indices:
+            raise RuntimeError("No main frames remain after warmup pre-roll computation.")
+
+        indices_to_process = warmup_pre_indices + main_processing_indices
+        if warmup_pre_indices:
+            first_main_real = all_frame_numbers[main_processing_indices[0]]
+            warmup_first_real = all_frame_numbers[warmup_pre_indices[0]]
+            warmup_last_real = all_frame_numbers[warmup_pre_indices[-1]]
+            FreeFlowUtils.log(
+                f"🔥 Warmup pre-roll: using {len(warmup_pre_indices)} frame(s) before main start {first_main_real} "
+                f"(range {warmup_first_real}-{warmup_last_real}).",
+                "INFO",
+            )
+
+        # Recompute progress totals after distributed anchor + warmup preprocessing
         total_steps_global = len(indices_to_process) * iterations
         pbar = ProgressBar(total_steps_global) if ProgressBar else None
         current_step_global = 0
@@ -634,7 +663,7 @@ class FreeFlow_AdaptiveEngine:
             # --- DENSIFICATION (Dynamic mode ONLY) ---
             # Frame 0 in Fixed mode uses Brush defaults (0.00004, 0.1) for maximum growth
             # Do NOT pass densification params for Frame 0 in Fixed mode!
-            is_first_frame = (idx == 0)
+            is_first_frame = (i == main_processing_indices[0])
             
             if not is_fixed_topology:
                 # Dynamic mode: use user-specified densification parameters
@@ -792,7 +821,7 @@ class FreeFlow_AdaptiveEngine:
 
             # --- WARMUP LOGIC ---
             # If warmup, move result to temp folder to avoid cluttering main output
-            is_warmup = (idx < warmup_frames)
+            is_warmup = (i in warmup_pre_set)
             # Force keep if it's the anchor (we usually want the anchor frame in the sequence)
             if distributed_anchor and real_frame_id == target_anchor_id:
                 is_warmup = False
@@ -821,11 +850,11 @@ class FreeFlow_AdaptiveEngine:
         realigned_dir = None
         smoothed_dir = None
         
-        if is_fixed_topology and len(indices_to_process) > 3:
+        if is_fixed_topology and len(main_processing_indices) > 3:
             FreeFlowUtils.log("🔗 Running Point Realignment...")
             try:
                 realigned_dir = self._apply_temporal_smoothing(
-                    output_dir, filename_prefix, indices_to_process, 
+                    output_dir, filename_prefix, main_processing_indices, 
                     multicam_feed, cameras, do_smoothing=False
                 )
                 FreeFlowUtils.log(f"✅ Realignment Complete! Saved to: {realigned_dir}")
@@ -833,7 +862,7 @@ class FreeFlow_AdaptiveEngine:
                 if apply_smoothing:
                     FreeFlowUtils.log("🌊 Running Temporal Smoothing...")
                     smoothed_dir = self._apply_temporal_smoothing(
-                        output_dir, filename_prefix, indices_to_process,
+                        output_dir, filename_prefix, main_processing_indices,
                         multicam_feed, cameras, do_smoothing=True
                     )
                     FreeFlowUtils.log(f"✅ Smoothing Complete! Saved to: {smoothed_dir}")
@@ -1224,13 +1253,9 @@ class FreeFlow_AdaptiveEngine:
                  # Buffer read entire body for speed
                  body = f.read()
                  
-                 # Safety limit for huge files? 
-                 # Usually partial updates aren't massive.
-                 
-                 batch_limit = 50000 
-                 step = max(1, vertex_count // batch_limit)
-                 
-                 for i in range(0, vertex_count, step):
+                 # Preserve full point count for warm start (no downsampling)
+                 # to avoid topology collapse between frame 0 and subsequent frames.
+                 for i in range(0, vertex_count):
                      base = i * stride
                      if base + stride > len(body): break
                      

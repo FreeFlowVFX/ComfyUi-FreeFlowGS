@@ -44,7 +44,6 @@ app.registerExtension({
                 // --- Brush-specific params ---
                 const brushParams = [
                     "visualize_training",
-                    "preview_interval",
                     "splat_count",
                     "learning_rate",
                     "densification_interval",
@@ -158,7 +157,7 @@ app.registerExtension({
                             } else if (splatfactoParams.includes(w.name)) {
                                 visible = isSplatfacto;
                             } else if (previewParams.includes(w.name)) {
-                                visible = isBrush;
+                                visible = isBrush && (viz === "Save Preview Images");
                             } else if (fixedTopoParams.includes(w.name)) {
                                 visible = (topo && topo.includes("Fixed"));
                             } else if (distributedParams.includes(w.name)) {

@@ -218,8 +218,8 @@ class FreeFlow_GS_Engine:
                     "tooltip": "Brush color/feature learning rate. Higher adapts color quickly but can increase flicker or saturation."
                 }),
                 "gaussian_lr": ("FLOAT", {
-                    "default": 0.00016, "min": 0.00001, "max": 0.1, "step": 0.00001,
-                    "tooltip": "Brush scale/shape learning rate. Keep low for stable geometry; high values can cause stretching artifacts."
+                    "default": 0.007, "min": 0.00001, "max": 0.1, "step": 0.00001,
+                    "tooltip": "Brush scale/shape learning rate (--lr-scale). Production-ready range is typically 0.005-0.01. Too low can appear frozen; too high can stretch/overfit splats."
                 }),
                 "opacity_lr": ("FLOAT", {
                     "default": 0.01, "min": 0.0001, "max": 0.1, "step": 0.0001,
@@ -337,7 +337,7 @@ class FreeFlow_GS_Engine:
                 }),
                 "warmup_frames": ("INT", {
                     "default": 0, "min": 0, "max": 1000,
-                    "tooltip": "Number of initial processed frames to keep as warmup-only outputs. Anchor frame is always preserved and never treated as warmup."
+                    "tooltip": "Number of pre-roll frames BEFORE the selected range to use as warmup. Selected main-range frames are preserved; anchor frame is never treated as warmup."
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
@@ -939,10 +939,9 @@ class FreeFlow_GS_Engine:
                 # Buffer read entire body for speed
                 body = f.read()
                 
-                batch_limit = 50000 
-                step = max(1, vertex_count // batch_limit)
-                
-                for i in range(0, vertex_count, step):
+                # Preserve full point count for warm start (no downsampling)
+                # to avoid topology collapse between frame 0 and subsequent frames.
+                for i in range(0, vertex_count):
                     base = i * stride
                     if base + stride > len(body): break
                     
@@ -1373,6 +1372,7 @@ class FreeFlow_GS_Engine:
         indices_to_process = self._parse_frames(kwargs.get("frame_selection", "all"), all_frame_numbers)
         if not indices_to_process:
             raise ValueError("No valid frames selected for training.")
+        base_selected_indices = list(indices_to_process)
         
         # 5. State
         binding_data = None
@@ -1409,6 +1409,7 @@ class FreeFlow_GS_Engine:
         distributed_anchor_source = None
         distributed_anchor_checkpoint_dir = None
         target_anchor_id = all_frame_numbers[indices_to_process[0]]
+        anchor_list_index = None
 
         if distributed_anchor:
             frame_str = str(distributed_anchor_frame).strip()
@@ -1532,18 +1533,61 @@ class FreeFlow_GS_Engine:
                             f"   ⚓ Distributed Priority: Moved Real Frame {target_anchor_id} (index {anchor_list_index}) to start of queue."
                         )
         
+        # Build warmup pre-roll from frames BEFORE the selected main range.
+        warmup_pre_indices = []
+        if warmup_frames > 0 and base_selected_indices:
+            first_main_idx = min(base_selected_indices)
+            warmup_start_idx = max(0, first_main_idx - int(warmup_frames))
+            warmup_pre_indices = list(range(warmup_start_idx, first_main_idx))
+
+        # Never treat anchor frame as warmup (distributed workflows)
+        if distributed_anchor and anchor_list_index is not None and anchor_list_index in warmup_pre_indices:
+            warmup_pre_indices = [idx for idx in warmup_pre_indices if idx != anchor_list_index]
+
+        warmup_pre_set = set(warmup_pre_indices)
+        main_processing_indices = [idx for idx in indices_to_process if idx not in warmup_pre_set]
+        if not main_processing_indices:
+            raise RuntimeError("No main frames remain after warmup pre-roll computation.")
+
+        main_start_index = main_processing_indices[0]
+
+        indices_to_process = warmup_pre_indices + main_processing_indices
+        if warmup_pre_indices:
+            first_main_real = all_frame_numbers[main_processing_indices[0]]
+            warmup_first_real = all_frame_numbers[warmup_pre_indices[0]]
+            warmup_last_real = all_frame_numbers[warmup_pre_indices[-1]]
+            FreeFlowUtils.log(
+                f"🔥 Warmup pre-roll: using {len(warmup_pre_indices)} frame(s) before main start {first_main_real} "
+                f"(range {warmup_first_real}-{warmup_last_real}).",
+                "INFO",
+            )
+
         # Topology mode flag
         is_fixed_topology = "Fixed" in topology_mode
 
         # Initial-frame quality overrides (Fixed mode only)
         initial_iterations_override = int(kwargs.get("initial_iterations_override", 12000))
         initial_quality_preset = kwargs.get("initial_quality_preset", "High (Recommended)")
+        base_brush_splat_count = int(kwargs.get('splat_count', 500000))
 
         # Consumer machines should continue from anchor checkpoint as-is (no first-frame densify boost)
         initial_override_allowed = not (distributed_anchor and distributed_mode == "consumer")
 
         # In distributed consumer mode, lock fixed topology from the first processed frame
         lock_topology_from_first_frame = is_fixed_topology and distributed_anchor and distributed_mode == "consumer"
+
+        # Fixed init override targets the first MAIN frame (not warmup pre-roll)
+        initial_quality_target_index = main_start_index
+
+        # Keep Brush max-splats cap consistent with first-frame quality preset in Fixed mode
+        # so later frames don't unintentionally clamp below the initialization density.
+        brush_fixed_splat_floor = base_brush_splat_count
+        if is_fixed_topology and initial_override_allowed:
+            preset = str(initial_quality_preset)
+            if preset == "High (Recommended)":
+                brush_fixed_splat_floor = max(brush_fixed_splat_floor, 700000)
+            elif preset == "Extreme (Slow)":
+                brush_fixed_splat_floor = max(brush_fixed_splat_floor, 1000000)
 
         # Progress Bar Setup (account for initial-frame iteration override)
         total_steps_global = len(indices_to_process) * iterations
@@ -1558,6 +1602,7 @@ class FreeFlow_GS_Engine:
         # 6. Loop
         for idx_seq, i in enumerate(indices_to_process):
             real_id = all_frame_numbers[i]
+            is_main_first_frame = (i == main_start_index)
             frame_work_dir = output_dir / f"frame_{real_id:04d}_work"
             frame_work_dir.mkdir(parents=True, exist_ok=True)
             
@@ -1623,7 +1668,7 @@ class FreeFlow_GS_Engine:
 
             is_initial_quality_frame = (
                 is_fixed_topology
-                and idx_seq == 0
+                and i == initial_quality_target_index
                 and initial_override_allowed
             )
 
@@ -1635,7 +1680,7 @@ class FreeFlow_GS_Engine:
             # Param dict construction with Fixed Topology CLI flags
             params = {
                 'iterations': frame_iterations,
-                'splat_count': kwargs.get('splat_count', 500000),
+                'splat_count': brush_fixed_splat_floor,
                 'learning_rate': kwargs.get('learning_rate', 0.00002),
                 'sh_degree': kwargs.get('sh_degree', 3),
             }
@@ -1740,7 +1785,7 @@ class FreeFlow_GS_Engine:
                 # Fixed topology for Splatfacto: lock immediately after anchor frame
                 # Frame 0: Establish topology (allow densification)
                 # Frame 1+: Lock topology (no further densification)
-                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
+                if is_fixed_topology and ((not is_main_first_frame) or lock_topology_from_first_frame):
                     params['continue_cull_post_densification'] = False
                     print(f"   🔒 [Fixed Topology] Frame {real_id}: Splatfacto topology locked (no densification)")
             elif is_opensplat:
@@ -1750,7 +1795,7 @@ class FreeFlow_GS_Engine:
                     'downscale_factor': 1,  # Could be exposed as param later
                 })
                 # Fixed topology for OpenSplat
-                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
+                if is_fixed_topology and ((not is_main_first_frame) or lock_topology_from_first_frame):
                     # OpenSplat may have different flags for topology locking
                     print(f"   🔒 [Fixed Topology] Frame {i}: OpenSplat warm start (topology via resume)")
             else:
@@ -1775,7 +1820,7 @@ class FreeFlow_GS_Engine:
                 # --- LEARNING RATE PARAMS ---
                 params.update({
                     'feature_lr': kwargs.get('feature_lr', 0.0025),
-                    'gaussian_lr': kwargs.get('gaussian_lr', 0.00016),
+                    'gaussian_lr': kwargs.get('gaussian_lr', 0.007),
                     'opacity_lr': kwargs.get('opacity_lr', 0.01),
                 })
                 
@@ -1803,7 +1848,7 @@ class FreeFlow_GS_Engine:
                 # Add Fixed Topology CLI flags for Brush if enabled AND not first frame
                 # Frame 0: Establish topology (allow densification with defaults for max growth)
                 # Frame 1+: Fixed topology (lock to preserve established structure)
-                if is_fixed_topology and (idx_seq > 0 or lock_topology_from_first_frame):
+                if is_fixed_topology and ((not is_main_first_frame) or lock_topology_from_first_frame):
                     params['growth_stop_iter'] = 0  # Stop adding points immediately (no growth)
                     params['densification_interval'] = 999999  # Disable refinement (no split/clone/replace)
                     print(f"   🔒 [Fixed Topology] Frame {real_id}: Topology Locked (Strict Frozen Mode)")
@@ -1953,7 +1998,7 @@ class FreeFlow_GS_Engine:
                     )
 
             # --- WARMUP LOGIC ---
-            is_warmup = (idx_seq < warmup_frames)
+            is_warmup = (i in warmup_pre_set)
             # Force keep if it's the anchor
             if distributed_anchor and real_id == target_anchor_id:
                 is_warmup = False
@@ -1971,7 +2016,7 @@ class FreeFlow_GS_Engine:
             prev_ply_path = prev_ply
             
             # D. Post-Train Binding (Frame 0)
-            if idx_seq == 0 and guidance_mesh and i < len(guidance_mesh):
+            if is_main_first_frame and guidance_mesh and i < len(guidance_mesh):
                  frame0_mesh = guidance_mesh[i]
                  binding_data = self._bind_to_mesh(ply_out, frame0_mesh['vertices'])
 
@@ -2002,7 +2047,7 @@ class FreeFlow_GS_Engine:
                     realigned_dir = self._apply_temporal_smoothing(
                         output_dir,
                         filename_prefix,
-                        indices_to_process,
+                        main_processing_indices,
                         multicam_feed,
                         cameras,
                         realign_topology=True,
@@ -2016,14 +2061,14 @@ class FreeFlow_GS_Engine:
                     FreeFlowUtils.log(f"Realignment failed: {e}", "WARN")
 
             if apply_smoothing:
-                if len(indices_to_process) > 3:
+                if len(main_processing_indices) > 3:
                     FreeFlowUtils.log("🌊 Running Temporal Smoothing (Savitzky-Golay)...")
                     try:
                         smoothing_source = realigned_dir if realigned_dir else output_dir
                         smoothed_dir = self._apply_temporal_smoothing(
                             output_dir,
                             filename_prefix,
-                            indices_to_process,
+                            main_processing_indices,
                             multicam_feed,
                             cameras,
                             realign_topology=False,  # Avoid double-realignment when smoothing from realigned source
