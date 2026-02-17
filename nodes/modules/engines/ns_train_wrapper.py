@@ -62,98 +62,181 @@ def main():
     if checkpoint_dir:
         from pathlib import Path
         ckpt_dir = Path(checkpoint_dir)
-        
-        # Find latest checkpoint
-        ckpt_files = sorted(ckpt_dir.glob("step-*.ckpt"))
-        if not ckpt_files:
-            print(f"[FreeFlow] WARNING: No checkpoint files in {ckpt_dir}")
-        else:
-            ckpt_path = ckpt_files[-1]
-            print(f"[FreeFlow] Loading checkpoint: {ckpt_path}")
-            
-            loaded_state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-            pipeline_state = loaded_state.get("pipeline", {})
-            
-            # Extract model weights (skip datamanager)
+
+        def _extract_model_state(pipeline_state):
             model_state = {}
+            if not isinstance(pipeline_state, dict):
+                return model_state
             for key, value in pipeline_state.items():
                 clean_key = key.replace("module.", "", 1) if key.startswith("module.") else key
                 if clean_key.startswith("_model.") or clean_key.startswith("model."):
                     model_state[clean_key] = value
-            
-            print(f"[FreeFlow] Extracted {len(model_state)} model weight tensors")
-            
-            # Find the means (positions) tensor
-            means_key = None
-            for k in model_state:
-                if k.endswith(".means") or k.endswith(".gauss_params.means"):
-                    means_key = k
-                    break
-            
-            if means_key and data_path:
-                means = model_state[means_key]
-                num_gaussians = means.shape[0]
-                print(f"[FreeFlow] Checkpoint has {num_gaussians} Gaussians")
-                
-                # Find color (features_dc) for approximate RGB
-                colors_key = None
-                for k in model_state:
-                    if "features_dc" in k:
-                        colors_key = k
+            return model_state
+
+        def _select_means_key(model_state):
+            preferred_keys = [
+                "_model.gauss_params.means",
+                "model.gauss_params.means",
+                "_model.means",
+                "model.means",
+            ]
+            for key in preferred_keys:
+                if key in model_state:
+                    return key
+            for key in model_state:
+                if key.endswith(".gauss_params.means") or key.endswith(".means"):
+                    return key
+            return None
+
+        def _validate_means_tensor(means_tensor):
+            if not isinstance(means_tensor, torch.Tensor):
+                return None, None, f"means is not a torch.Tensor (got {type(means_tensor).__name__})"
+            try:
+                means_cpu = means_tensor.detach().cpu().float()
+            except Exception as ex:
+                return None, None, f"failed to move means to CPU ({ex})"
+
+            if means_cpu.ndim != 2:
+                return None, None, f"unexpected means rank {means_cpu.ndim} (expected 2)"
+            if means_cpu.shape[0] <= 0:
+                return None, None, "means has zero rows"
+            if means_cpu.shape[1] < 3:
+                return None, None, f"unexpected means shape {tuple(means_cpu.shape)} (expected Nx3+)"
+
+            xyz = means_cpu[:, :3]
+            finite_mask = torch.isfinite(xyz).all(dim=1)
+            finite_count = int(finite_mask.sum().item())
+            if finite_count <= 0:
+                return None, None, "no finite xyz rows in means tensor"
+            if finite_count != int(xyz.shape[0]):
+                return None, None, f"means has {int(xyz.shape[0]) - finite_count} non-finite rows"
+
+            return xyz, finite_mask, None
+        
+        # Find candidate checkpoints (newest first), validate, and pick first good one.
+        ckpt_files = sorted(ckpt_dir.glob("step-*.ckpt"))
+        if not ckpt_files:
+            print(f"[FreeFlow] WARNING: No checkpoint files in {ckpt_dir}")
+        else:
+            selected_ckpt_path = None
+            selected_model_state = None
+            selected_means_xyz = None
+            selected_finite_mask = None
+            selected_colors_tensor = None
+
+            for ckpt_path in reversed(ckpt_files):
+                print(f"[FreeFlow] Checking checkpoint candidate: {ckpt_path.name}")
+
+                try:
+                    loaded_state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                except Exception as ex:
+                    print(f"[FreeFlow] WARNING: Failed to load {ckpt_path.name} ({type(ex).__name__}: {ex})")
+                    continue
+
+                model_state = _extract_model_state(loaded_state.get("pipeline", {}))
+                if not model_state:
+                    print(f"[FreeFlow] WARNING: {ckpt_path.name} has no model tensors in pipeline state")
+                    continue
+
+                means_key = _select_means_key(model_state)
+                if not means_key:
+                    print(f"[FreeFlow] WARNING: {ckpt_path.name} has no means tensor key")
+                    continue
+
+                means_xyz, finite_mask, means_error = _validate_means_tensor(model_state.get(means_key))
+                if means_error:
+                    print(f"[FreeFlow] WARNING: Skipping {ckpt_path.name}: {means_error}")
+                    continue
+
+                colors_tensor = None
+                for key, value in model_state.items():
+                    if "features_dc" in key and isinstance(value, torch.Tensor):
+                        colors_tensor = value
                         break
-                
-                # Write points3D.txt with checkpoint positions
-                # CRITICAL: Delete points3D.bin if it exists — nerfstudio checks .bin FIRST
-                # and would read the original COLMAP sparse (50k) instead of our checkpoint (200k)
-                points3d_path = Path(data_path) / "sparse" / "0" / "points3D.txt"
-                points3d_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                bin_file = points3d_path.parent / "points3D.bin"
-                if bin_file.exists():
-                    bin_file.unlink()
-                    print(f"[FreeFlow] Deleted points3D.bin (forcing nerfstudio to read our .txt)")
-                
-                SH_C0 = 0.28209479177387814
-                
-                with open(points3d_path, "w") as f:
-                    f.write("# 3D point list with one line of data per point:\n")
-                    f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
-                    f.write(f"# Number of points: {num_gaussians}, mean track length: 0\n")
-                    
-                    for idx in range(num_gaussians):
-                        x, y, z = means[idx].tolist()
-                        
-                        # Skip NaN points
-                        if x != x or y != y or z != z:
-                            continue
-                        
-                        # Approximate RGB from SH DC coefficient
-                        r, g, b = 128, 128, 128
-                        if colors_key and colors_key in model_state:
-                            dc = model_state[colors_key][idx]
-                            # features_dc shape is typically [1, 3] or [3]
-                            if dc.dim() > 1:
-                                dc = dc.squeeze(0)
-                            rf = dc[0].item() * SH_C0 + 0.5
-                            gf = dc[1].item() * SH_C0 + 0.5
-                            bf = dc[2].item() * SH_C0 + 0.5
-                            r = min(255, max(0, int(rf * 255)))
-                            g = min(255, max(0, int(gf * 255)))
-                            b = min(255, max(0, int(bf * 255)))
-                        
-                        f.write(f"{idx + 1} {x:.6f} {y:.6f} {z:.6f} {r} {g} {b} 0.0\n")
-                
-                print(f"[FreeFlow] Seeded points3D.txt with {num_gaussians} points from checkpoint")
-                print(f"[FreeFlow]   → {points3d_path}")
-                
-                # Store model state for injection after pipeline setup
-                _ff_model_state = model_state
-            elif not means_key:
-                print(f"[FreeFlow] WARNING: No 'means' tensor found in checkpoint keys:")
-                for k in sorted(model_state.keys())[:20]:
-                    print(f"[FreeFlow]   {k}: {model_state[k].shape}")
-            elif not data_path:
-                print(f"[FreeFlow] WARNING: --data path not found in args, cannot seed points3D.txt")
+
+                selected_ckpt_path = ckpt_path
+                selected_model_state = model_state
+                selected_means_xyz = means_xyz
+                selected_finite_mask = finite_mask
+                selected_colors_tensor = colors_tensor
+                print(f"[FreeFlow] Using checkpoint: {ckpt_path}")
+                print(f"[FreeFlow] Extracted {len(model_state)} model weight tensors")
+                break
+
+            if selected_ckpt_path and data_path:
+                if selected_means_xyz is None or selected_finite_mask is None or selected_model_state is None:
+                    print("[FreeFlow] WARNING: Internal checkpoint-selection state incomplete; falling back to sparse init")
+                else:
+                    num_gaussians = selected_means_xyz.shape[0]
+                    valid_points = int(selected_finite_mask.sum().item())
+                    skipped_invalid = int(num_gaussians - valid_points)
+                    print(f"[FreeFlow] Checkpoint has {num_gaussians} Gaussians ({valid_points} finite xyz rows)")
+
+                    # Write points3D.txt with checkpoint positions
+                    # CRITICAL: Delete points3D.bin if it exists — nerfstudio checks .bin FIRST
+                    # and would read the original COLMAP sparse instead of our checkpoint seed.
+                    points3d_path = Path(data_path) / "sparse" / "0" / "points3D.txt"
+                    points3d_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    bin_file = points3d_path.parent / "points3D.bin"
+                    if bin_file.exists():
+                        bin_file.unlink()
+                        print("[FreeFlow] Deleted points3D.bin (forcing nerfstudio to read our .txt)")
+
+                    SH_C0 = 0.28209479177387814
+
+                    with open(points3d_path, "w") as f:
+                        f.write("# 3D point list with one line of data per point:\n")
+                        f.write("#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n")
+                        f.write(f"# Number of points: {valid_points}, mean track length: 0\n")
+
+                        point_id = 1
+                        for idx in range(num_gaussians):
+                            if not bool(selected_finite_mask[idx].item()):
+                                continue
+
+                            x, y, z = selected_means_xyz[idx].tolist()
+
+                            # Approximate RGB from SH DC coefficient
+                            r, g, b = 128, 128, 128
+                            if (
+                                isinstance(selected_colors_tensor, torch.Tensor)
+                                and selected_colors_tensor.ndim >= 2
+                                and idx < selected_colors_tensor.shape[0]
+                            ):
+                                try:
+                                    dc = selected_colors_tensor[idx]
+                                    if dc.dim() > 1:
+                                        dc = dc.squeeze(0)
+                                    if dc.numel() >= 3:
+                                        dc_rgb = dc[:3].detach().cpu().float()
+                                        if bool(torch.isfinite(dc_rgb).all().item()):
+                                            rf = dc_rgb[0].item() * SH_C0 + 0.5
+                                            gf = dc_rgb[1].item() * SH_C0 + 0.5
+                                            bf = dc_rgb[2].item() * SH_C0 + 0.5
+                                            r = min(255, max(0, int(rf * 255)))
+                                            g = min(255, max(0, int(gf * 255)))
+                                            b = min(255, max(0, int(bf * 255)))
+                                except Exception:
+                                    pass
+
+                            f.write(f"{point_id} {x:.6f} {y:.6f} {z:.6f} {r} {g} {b} 0.0\n")
+                            point_id += 1
+
+                    print(
+                        f"[FreeFlow] Seeded points3D.txt with {valid_points} points from {selected_ckpt_path.name}"
+                        + (f" (skipped {skipped_invalid} invalid)" if skipped_invalid > 0 else "")
+                    )
+                    print(f"[FreeFlow]   → {points3d_path}")
+
+                    # Store model state for injection after pipeline setup
+                    _ff_model_state = selected_model_state
+            elif selected_ckpt_path and not data_path:
+                print("[FreeFlow] WARNING: --data path not found in args, cannot seed points3D.txt")
+                print("[FreeFlow] WARNING: Falling back to sparse init (warm-start injection skipped)")
+            else:
+                print(f"[FreeFlow] WARNING: No valid checkpoint found in {ckpt_dir}")
+                print("[FreeFlow] WARNING: Falling back to sparse init for this frame")
     
     # --- STEP 2: Patch Trainer.setup to inject weights post-creation ---
     if _ff_model_state:
