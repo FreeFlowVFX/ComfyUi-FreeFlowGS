@@ -4,14 +4,89 @@ import sys
 import platform
 import shutil
 import urllib.request
+import urllib.error
 import json
 import zipfile
 import tarfile
 import stat
+import ssl
 from pathlib import Path
 import logging
 
 logger = logging.getLogger("FreeFlow.BrushLoader")
+
+
+def _is_truthy_env(var_name):
+    value = os.environ.get(var_name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_ssl_contexts():
+    if _is_truthy_env("FREEFLOW_SSL_NO_VERIFY"):
+        logger.warning("FREEFLOW_SSL_NO_VERIFY=1 set: TLS verification DISABLED for Brush downloads")
+        return [("insecure", ssl._create_unverified_context())]
+
+    contexts = []
+
+    for env_name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+        cert_path = os.environ.get(env_name)
+        if not cert_path:
+            continue
+        try:
+            contexts.append((f"{env_name}:{cert_path}", ssl.create_default_context(cafile=cert_path)))
+        except Exception as e:
+            logger.warning(f"Ignoring invalid CA bundle in {env_name}: {e}")
+
+    contexts.append(("system", ssl.create_default_context()))
+
+    try:
+        import certifi
+        certifi_path = certifi.where()
+        if certifi_path:
+            contexts.append((f"certifi:{certifi_path}", ssl.create_default_context(cafile=certifi_path)))
+    except Exception:
+        pass
+
+    return contexts
+
+
+def _urlopen_with_ssl_fallback(url, headers=None, timeout=None):
+    merged_headers = {'User-Agent': 'Mozilla/5.0'}
+    if headers:
+        merged_headers.update(headers)
+
+    req = urllib.request.Request(url, headers=merged_headers)
+    contexts = _build_ssl_contexts()
+
+    for idx, (ctx_name, ctx) in enumerate(contexts):
+        try:
+            kwargs = {'context': ctx}
+            if timeout is not None:
+                kwargs['timeout'] = timeout
+            return urllib.request.urlopen(req, **kwargs)
+        except Exception as e:
+            is_ssl_error = False
+
+            if isinstance(e, ssl.SSLError):
+                is_ssl_error = True
+
+            if isinstance(e, urllib.error.URLError):
+                reason = getattr(e, "reason", None)
+                if isinstance(reason, ssl.SSLError):
+                    is_ssl_error = True
+                elif reason and "CERTIFICATE_VERIFY_FAILED" in str(reason):
+                    is_ssl_error = True
+
+            if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                is_ssl_error = True
+
+            if is_ssl_error and idx < len(contexts) - 1:
+                logger.warning(f"SSL open failed using {ctx_name}, trying fallback trust store...")
+                continue
+
+            raise
+
+    raise RuntimeError("Unable to open URL with available SSL contexts")
 
 def ensure_brush_binary():
     """
@@ -51,8 +126,7 @@ def ensure_brush_binary():
         
         # GitHub API
         url = "https://api.github.com/repos/ArthurBrussee/brush/releases/latest"
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response:
+        with _urlopen_with_ssl_fallback(url, headers={'User-Agent': 'Mozilla/5.0'}) as response:
             data = json.loads(response.read().decode())
             
         assets = data.get('assets', [])
@@ -111,7 +185,7 @@ def ensure_brush_binary():
         logger.info(f"Downloading {target_asset['name']} from {download_url}...")
         
         zip_path = bin_dir / target_asset['name']
-        with urllib.request.urlopen(download_url) as response, open(zip_path, 'wb') as out_file:
+        with _urlopen_with_ssl_fallback(download_url) as response, open(zip_path, 'wb') as out_file:
             shutil.copyfileobj(response, out_file)
             
         # Extract

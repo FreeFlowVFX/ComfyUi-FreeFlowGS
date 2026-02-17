@@ -5,8 +5,10 @@ import os
 import sys
 import shutil
 import urllib.request
+import urllib.error
 import zipfile
 import tarfile
+import ssl
 from pathlib import Path
 import folder_paths
 
@@ -114,12 +116,98 @@ class FreeFlowUtils:
             }
 
     @staticmethod
+    def _is_truthy_env(var_name):
+        value = os.environ.get(var_name, "")
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _build_ssl_contexts():
+        """
+        Build SSL contexts for robust cross-platform downloads.
+
+        Order:
+        1) Explicit CA bundle from env vars
+        2) System trust store
+        3) certifi trust store (if available)
+
+        FREEFLOW_SSL_NO_VERIFY=1 forces insecure mode as an explicit opt-in.
+        """
+        if FreeFlowUtils._is_truthy_env("FREEFLOW_SSL_NO_VERIFY"):
+            FreeFlowUtils.log("FREEFLOW_SSL_NO_VERIFY=1 set: TLS verification DISABLED for FreeFlow downloads", "WARN")
+            return [("insecure", ssl._create_unverified_context())]
+
+        contexts = []
+        seen = set()
+
+        for env_name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
+            cert_path = os.environ.get(env_name)
+            if not cert_path:
+                continue
+            key = (env_name, cert_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                contexts.append((f"{env_name}:{cert_path}", ssl.create_default_context(cafile=cert_path)))
+            except Exception as e:
+                FreeFlowUtils.log(f"Ignoring invalid CA bundle in {env_name}: {e}", "WARN")
+
+        contexts.append(("system", ssl.create_default_context()))
+
+        try:
+            import certifi
+            certifi_path = certifi.where()
+            if certifi_path:
+                contexts.append((f"certifi:{certifi_path}", ssl.create_default_context(cafile=certifi_path)))
+        except Exception:
+            pass
+
+        return contexts
+
+    @staticmethod
+    def _urlopen_with_ssl_fallback(url, headers=None, timeout=None):
+        merged_headers = {'User-Agent': 'Mozilla/5.0'}
+        if headers:
+            merged_headers.update(headers)
+
+        req = urllib.request.Request(url, headers=merged_headers)
+        contexts = FreeFlowUtils._build_ssl_contexts()
+
+        for idx, (ctx_name, ctx) in enumerate(contexts):
+            try:
+                kwargs = {'context': ctx}
+                if timeout is not None:
+                    kwargs['timeout'] = timeout
+                return urllib.request.urlopen(req, **kwargs)
+            except Exception as e:
+                is_ssl_error = False
+
+                if isinstance(e, ssl.SSLError):
+                    is_ssl_error = True
+
+                if isinstance(e, urllib.error.URLError):
+                    reason = getattr(e, "reason", None)
+                    if isinstance(reason, ssl.SSLError):
+                        is_ssl_error = True
+                    elif reason and "CERTIFICATE_VERIFY_FAILED" in str(reason):
+                        is_ssl_error = True
+
+                if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                    is_ssl_error = True
+
+                if is_ssl_error and idx < len(contexts) - 1:
+                    FreeFlowUtils.log(f"SSL open failed using {ctx_name}, trying fallback trust store...", "WARN")
+                    continue
+
+                raise
+
+        raise RuntimeError("Unable to open URL with available SSL contexts")
+
+    @staticmethod
     def download_file(url, dest_path):
         FreeFlowUtils.log(f"Downloading {url} to {dest_path}...")
         try:
-            # Create request with User-Agent to avoid some 403s
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
+            with FreeFlowUtils._urlopen_with_ssl_fallback(url) as response, open(dest_path, 'wb') as out_file:
                 total_size = int(response.getheader('Content-Length', 0))
                 block_size = 1024 * 1024 # 1MB chunks
                 downloaded = 0
@@ -270,8 +358,7 @@ class FreeFlowUtils:
         import json
         url = f"https://api.github.com/repos/{repo_name}/releases/latest"
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
-            with urllib.request.urlopen(req, timeout=3) as response:
+            with FreeFlowUtils._urlopen_with_ssl_fallback(url, headers={'User-Agent': 'FreeFlow-Version-Checker'}, timeout=3) as response:
                 if response.status == 200:
                     data = json.loads(response.read())
                     return data.get("tag_name", "").lstrip("v")
@@ -285,8 +372,7 @@ class FreeFlowUtils:
         import json
         url = f"https://registry.npmjs.org/{package_name}/latest"
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'FreeFlow-Version-Checker'})
-            with urllib.request.urlopen(req, timeout=3) as response:
+            with FreeFlowUtils._urlopen_with_ssl_fallback(url, headers={'User-Agent': 'FreeFlow-Version-Checker'}, timeout=3) as response:
                 if response.status == 200:
                     data = json.loads(response.read())
                     return data.get("version", "")

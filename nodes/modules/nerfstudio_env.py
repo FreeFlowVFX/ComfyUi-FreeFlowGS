@@ -12,6 +12,7 @@ import os
 import sys
 import subprocess
 import shutil
+import time
 from pathlib import Path
 from typing import Optional, Callable, List, Tuple
 
@@ -364,6 +365,64 @@ class NerfstudioEnvironment:
             "nerfstudio>=1.0.0",
             "gsplat>=1.0.0",
         ]
+
+    @classmethod
+    def _rmtree_onerror(cls, func, path, exc_info):
+        """Best-effort handler for read-only files during rmtree."""
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except Exception:
+            pass
+
+    @classmethod
+    def _remove_existing_venv(cls, report: Optional[Callable[[str, float], None]] = None) -> bool:
+        """
+        Remove existing venv robustly.
+
+        On problematic filesystems (network mounts, delayed file visibility),
+        shutil.rmtree can fail with "Directory not empty". We retry, then move
+        the stale venv aside so a fresh install can continue.
+        """
+        if not cls.VENV_PATH.exists():
+            return True
+
+        for attempt in range(1, 4):
+            try:
+                shutil.rmtree(cls.VENV_PATH, onerror=cls._rmtree_onerror)
+                return True
+            except Exception as e:
+                print(f"[NerfstudioEnv] remove attempt {attempt}/3 failed: {e}")
+                if attempt < 3:
+                    time.sleep(0.5 * attempt)
+
+        stale_path = cls.PROJECT_ROOT / f".nerfstudio_venv_stale_{int(time.time())}"
+        counter = 1
+        while stale_path.exists():
+            stale_path = cls.PROJECT_ROOT / f".nerfstudio_venv_stale_{int(time.time())}_{counter}"
+            counter += 1
+
+        try:
+            cls.VENV_PATH.rename(stale_path)
+            msg = f"WARNING: Could not fully delete old venv, moved to {stale_path.name}"
+            print(f"[NerfstudioEnv] {msg}")
+            if report:
+                report(msg, 0.08)
+
+            # Best effort: clean it up in-place after rename.
+            try:
+                shutil.rmtree(stale_path, onerror=cls._rmtree_onerror)
+                print(f"[NerfstudioEnv] Removed stale venv folder: {stale_path}")
+            except Exception as cleanup_error:
+                print(f"[NerfstudioEnv] Stale venv cleanup deferred: {cleanup_error}")
+
+            return True
+        except Exception as e:
+            err = f"ERROR: Failed to remove or move corrupted venv: {e}"
+            print(f"[NerfstudioEnv] {err}")
+            if report:
+                report(err, 0.0)
+            return False
     
     @classmethod
     def create_venv(cls, progress_callback: Optional[Callable[[str, float], None]] = None) -> bool:
@@ -421,7 +480,8 @@ class NerfstudioEnvironment:
                 return True
             else:
                 report("Existing venv is corrupted, removing...", 0.05)
-                shutil.rmtree(cls.VENV_PATH)
+                if not cls._remove_existing_venv(report):
+                    return False
         
         report("Creating virtual environment...", 0.1)
         
