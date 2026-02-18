@@ -43,6 +43,7 @@ class SplatfactoEngine(IGSEngine):
         self._init_error = None
         self.last_checkpoint_dir = None  # Stores checkpoint dir from last successful training
         self._browser_opened = False  # Track if browser was already opened (only open once per run)
+        self._lpips_cache_attempted = False
         
         try:
             from ..nerfstudio_env import NerfstudioEnvironment
@@ -75,6 +76,131 @@ class SplatfactoEngine(IGSEngine):
         if not self._env:
             return {"error": self._init_error}
         return self._env.get_status_info()
+
+    @staticmethod
+    def _is_truthy_env(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _detect_default_ca_bundle() -> Optional[str]:
+        candidates = [
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/ssl/cert.pem",
+        ]
+        for candidate in candidates:
+            if Path(candidate).exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _get_project_root() -> Path:
+        # .../custom_nodes/ComfyUi-FreeFlowGS/nodes/modules/engines/splatfacto_engine.py
+        #                                 ^ parents[3] = project root
+        try:
+            return Path(__file__).resolve().parents[3]
+        except Exception:
+            return Path(__file__).resolve().parent
+
+    def _build_nerfstudio_env(self, include_unbuffered: bool = False) -> Dict[str, str]:
+        run_env = os.environ.copy()
+
+        if include_unbuffered:
+            run_env["PYTHONUNBUFFERED"] = "1"
+
+        # Fix console encoding + PyTorch 2.6 checkpoint loading behavior.
+        run_env["PYTHONIOENCODING"] = "utf-8"
+        run_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+
+        # Keep torch cache local to FreeFlow unless user provided TORCH_HOME.
+        torch_home = run_env.get("TORCH_HOME")
+        if not torch_home:
+            torch_home = str(self._get_project_root() / ".torch_cache")
+            run_env["TORCH_HOME"] = torch_home
+
+        try:
+            checkpoints_dir = Path(torch_home).expanduser() / "hub" / "checkpoints"
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        # Respect explicit insecure mode only when user opts in.
+        if self._is_truthy_env(run_env.get("FREEFLOW_SSL_NO_VERIFY")):
+            run_env.setdefault("PYTHONHTTPSVERIFY", "0")
+            return run_env
+
+        # Populate CA bundle env vars for stdlib/requests/curl consumers.
+        ca_bundle = (
+            run_env.get("SSL_CERT_FILE")
+            or run_env.get("REQUESTS_CA_BUNDLE")
+            or run_env.get("CURL_CA_BUNDLE")
+            or self._detect_default_ca_bundle()
+        )
+        if ca_bundle:
+            run_env.setdefault("SSL_CERT_FILE", ca_bundle)
+            run_env.setdefault("REQUESTS_CA_BUNDLE", ca_bundle)
+            run_env.setdefault("CURL_CA_BUNDLE", ca_bundle)
+
+        return run_env
+
+    def _ensure_lpips_alexnet_cached(self, run_env: Dict[str, str]) -> None:
+        """Best-effort one-time pre-cache for LPIPS AlexNet weights."""
+        if self._lpips_cache_attempted:
+            return
+        self._lpips_cache_attempted = True
+
+        torch_home = run_env.get("TORCH_HOME")
+        if not torch_home or not self._env:
+            return
+
+        checkpoints_dir = Path(torch_home).expanduser() / "hub" / "checkpoints"
+        try:
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        if list(checkpoints_dir.glob("alexnet-*.pth")):
+            return
+
+        venv_python = self._env.get_python()
+        if not venv_python:
+            return
+
+        print("[SplatfactoEngine] Pre-caching LPIPS AlexNet weights (one-time)...")
+        cmd = [
+            str(venv_python),
+            "-c",
+            (
+                "from torchvision.models import alexnet, AlexNet_Weights; "
+                "alexnet(weights=AlexNet_Weights.DEFAULT); "
+                "print('alexnet weights cached')"
+            ),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=run_env,
+            )
+            if result.returncode == 0:
+                cached = list(checkpoints_dir.glob("alexnet-*.pth"))
+                if cached:
+                    print(f"[SplatfactoEngine] LPIPS cache ready: {cached[0].name}")
+                else:
+                    print("[SplatfactoEngine] LPIPS pre-cache completed")
+            else:
+                detail = (result.stderr or result.stdout or "").strip()
+                if detail:
+                    detail = detail.splitlines()[-1]
+                print(f"[SplatfactoEngine] LPIPS pre-cache skipped: {detail or 'unknown error'}")
+        except Exception as e:
+            print(f"[SplatfactoEngine] LPIPS pre-cache skipped: {e}")
     
     def install(self, progress_callback: Optional[Callable[[str, float], None]] = None) -> bool:
         """
@@ -292,15 +418,8 @@ class SplatfactoEngine(IGSEngine):
         print(f"[SplatfactoEngine] Running: {' '.join(cmd)}")
         
         # Execute training
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        # Fix Windows console encoding issues with Rich library
-        # Without this, nerfstudio crashes on CONSOLE.rule() due to cp1252 encoding
-        env["PYTHONIOENCODING"] = "utf-8"
-        # PyTorch 2.6 changed torch.load() default to weights_only=True
-        # Nerfstudio 1.1.5 uses torch.load() without specifying weights_only
-        # which causes checkpoint loading to fail. This env var restores old behavior.
-        env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+        env = self._build_nerfstudio_env(include_unbuffered=True)
+        self._ensure_lpips_alexnet_cached(env)
         
         try:
             process = subprocess.Popen(
@@ -502,6 +621,10 @@ class SplatfactoEngine(IGSEngine):
 
             if not export_success:
                 export_success = self._export_ply(config_path, output_path)
+
+            if not export_success and checkpoint_dir and not is_fixed_topology:
+                print("[SplatfactoEngine] ns-export failed; trying checkpoint-direct export fallback")
+                export_success = self._export_ply_from_checkpoint(checkpoint_dir, output_path)
 
             if not export_success:
                 print("[SplatfactoEngine] Error: PLY export failed")
@@ -705,11 +828,8 @@ class SplatfactoEngine(IGSEngine):
         
         print(f"[SplatfactoEngine] Exporting PLY: {' '.join(cmd)}")
         
-        # Fix Windows console encoding issues with Rich library
-        export_env = os.environ.copy()
-        export_env["PYTHONIOENCODING"] = "utf-8"
-        # PyTorch 2.6 weights_only fix (same as ns-train)
-        export_env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+        export_env = self._build_nerfstudio_env(include_unbuffered=False)
+        self._ensure_lpips_alexnet_cached(export_env)
         
         try:
             result = subprocess.run(
