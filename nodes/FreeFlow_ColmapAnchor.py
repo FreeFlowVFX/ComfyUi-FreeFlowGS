@@ -450,7 +450,11 @@ class FreeFlow_ColmapAnchor:
             if FreeFlowUtils.get_os() == "Darwin":
                 error_msg += "Run: brew install colmap"
             elif FreeFlowUtils.get_os() == "Linux":
-                error_msg += "Run: sudo apt install colmap"
+                error_msg += (
+                    "FreeFlow expects a local install inside the extension directory. "
+                    "Restart ComfyUI to trigger auto-install, or set FREEFLOW_COLMAP_LINUX_URL "
+                    "(or FREEFLOW_COLMAP_LINUX_LOCAL_ARCHIVE) for a custom Linux binary source."
+                )
             else:
                 error_msg += "Download from colmap.github.io and place in bin/"
             raise FileNotFoundError(error_msg)

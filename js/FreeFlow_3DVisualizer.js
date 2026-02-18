@@ -9,7 +9,11 @@ import { api } from "../../scripts/api.js";
 
 console.log("🌊 FreeFlow 3D Visualizer Loaded");
 
-// Load Three.js + Addons from CDN
+// Load Three.js + Addons (local-first, CDN fallback)
+const THREE_LOCAL = "./three.module.js";
+const ORBIT_LOCAL = "./OrbitControls.js";
+const TRANSFORM_LOCAL = "./TransformControls.js";
+
 const THREE_CDN = "https://unpkg.com/three@0.160.0/build/three.module.js";
 const ORBIT_CDN = "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
 const TRANSFORM_CDN = "https://unpkg.com/three@0.160.0/examples/jsm/controls/TransformControls.js";
@@ -19,17 +23,46 @@ let OrbitControls = null;
 let TransformControls = null;
 
 async function loadThreeJS() {
-    if (THREE) return;
-    try {
-        THREE = await import(THREE_CDN);
-        const orbitModule = await import(ORBIT_CDN);
-        OrbitControls = orbitModule.OrbitControls;
-        const transformModule = await import(TRANSFORM_CDN);
-        TransformControls = transformModule.TransformControls;
-        console.log("🌊 Three.js + Gizmos loaded successfully");
-    } catch (e) {
-        console.error("Failed to load Three.js:", e);
+    if (window.THREE && window.OrbitControls) {
+        THREE = window.THREE;
+        OrbitControls = window.OrbitControls;
+        TransformControls = window.TransformControls || null;
+        return;
     }
+
+    const importFirst = async (urls, label, optional = false) => {
+        let lastError = null;
+        for (const url of urls) {
+            try {
+                return await import(url);
+            } catch (err) {
+                lastError = err;
+            }
+        }
+
+        if (optional) {
+            console.warn(`🌊 Optional ${label} not available. Continuing without it.`, lastError);
+            return null;
+        }
+
+        throw lastError || new Error(`Failed to load ${label}`);
+    };
+
+    const threeModule = await importFirst([THREE_LOCAL, THREE_CDN], "Three.js");
+    const orbitModule = await importFirst([ORBIT_LOCAL, ORBIT_CDN], "OrbitControls");
+    const transformModule = await importFirst([TRANSFORM_LOCAL, TRANSFORM_CDN], "TransformControls", true);
+
+    window.THREE = threeModule;
+    window.OrbitControls = orbitModule?.OrbitControls;
+    if (transformModule?.TransformControls) {
+        window.TransformControls = transformModule.TransformControls;
+    }
+
+    THREE = window.THREE;
+    OrbitControls = window.OrbitControls;
+    TransformControls = window.TransformControls || null;
+
+    console.log("🌊 Three.js core loaded (local-first)");
 }
 
 function createVisualizerWidget(node) {
@@ -157,9 +190,7 @@ function createVisualizerWidget(node) {
                 // Load Libraries
                 console.log("🌊 FreeFlow 3D Visualizer - V3 Loaded");
                 try {
-                    if (!window.THREE) window.THREE = await import('https://unpkg.com/three@0.160.0/build/three.module.js');
-                    if (!window.OrbitControls) window.OrbitControls = (await import('https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js')).OrbitControls;
-                    if (!window.TransformControls) window.TransformControls = (await import('https://unpkg.com/three@0.160.0/examples/jsm/controls/TransformControls.js')).TransformControls;
+                    await loadThreeJS();
                     console.log("🌊 Three.js loaded successfully");
                 } catch (e) {
                     console.error("🌊 Failed to load Three.js:", e);
@@ -167,6 +198,7 @@ function createVisualizerWidget(node) {
                 }
 
                 if (!window.THREE) throw new Error("Could not load Three.js");
+                if (!window.OrbitControls) throw new Error("Could not load OrbitControls");
                 const THREE = window.THREE;
                 const OrbitControls = window.OrbitControls;
                 const TransformControls = window.TransformControls;

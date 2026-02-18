@@ -17,6 +17,7 @@ import folder_paths
 BRUSH_VERSION = "0.3.0"
 BRUSH_REPO = "ArthurBrussee/brush"
 COLMAP_REPO = "colmap/colmap"
+COLMAP_DEFAULT_VERSION = "3.13.0"
 GSPLAT_VERSION = "1.2.9"  # gsplat.js npm version
 GSPLAT_CDN_URL = f"https://cdn.jsdelivr.net/npm/gsplat@{GSPLAT_VERSION}/dist/index.es.js"
 
@@ -25,7 +26,12 @@ BRUSH_URL_WIN = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRU
 BRUSH_URL_MAC = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-aarch64-apple-darwin.tar.xz"
 BRUSH_URL_LINUX = f"https://github.com/ArthurBrussee/brush/releases/download/v{BRUSH_VERSION}/brush-app-x86_64-unknown-linux-gnu.tar.xz"
 
-COLMAP_URL_WIN = "https://github.com/colmap/colmap/releases/download/3.13.0/colmap-x64-windows-cuda.zip"
+COLMAP_URL_WIN = f"https://github.com/colmap/colmap/releases/download/{COLMAP_DEFAULT_VERSION}/colmap-x64-windows-cuda.zip"
+COLMAP_STRATEGY_ENV = "FREEFLOW_COLMAP_INSTALL_STRATEGY"
+COLMAP_LINUX_URL_ENV = "FREEFLOW_COLMAP_LINUX_URL"
+COLMAP_LINUX_LOCAL_ARCHIVE_ENV = "FREEFLOW_COLMAP_LINUX_LOCAL_ARCHIVE"
+MICROMAMBA_LINUX_X64_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64"
+MICROMAMBA_LINUX_AARCH64_URL = "https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-aarch64"
 # VOCAB TREE MIRRORS (Try in order) - FAISS VERSION FOR COLMAP 3.12+
 VOCAB_TREE_MIRRORS = [
     "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words32K.bin",
@@ -251,6 +257,12 @@ class FreeFlowUtils:
             elif archive_path.name.endswith(".tar.xz") or archive_path.name.endswith(".txz"):
                  with tarfile.open(archive_path, "r:xz") as tar:
                     tar.extractall(extract_to)
+            elif archive_path.name.endswith(".tar"):
+                 with tarfile.open(archive_path, "r:") as tar:
+                    tar.extractall(extract_to)
+            elif archive_path.name.endswith(".tar.bz2") or archive_path.name.endswith(".tbz2"):
+                 with tarfile.open(archive_path, "r:bz2") as tar:
+                    tar.extractall(extract_to)
             else:
                 FreeFlowUtils.log(f"Unknown archive format: {archive_path.suffix}", "ERROR")
                 return False
@@ -403,31 +415,374 @@ class FreeFlowUtils:
         t.start()
 
     @staticmethod
-    def install_colmap(version="3.13.0"):
-        # ONLY SUPPORTED FOR WINDOWS AUTO-INSTALL
-        if FreeFlowUtils.get_os() != "Windows":
-             FreeFlowUtils.log("Auto-Installation of COLMAP is only supported on Windows.", "WARN")
-             return False
+    def _get_colmap_install_strategy():
+        raw = os.environ.get(COLMAP_STRATEGY_ENV, "binary-first").strip().lower()
+        alias_map = {
+            "default": "binary-first",
+            "auto": "binary-first",
+            "binary": "binary-first",
+            "mamba": "mamba-only",
+            "conda": "mamba-only",
+        }
+        strategy = alias_map.get(raw, raw)
+        if strategy not in {"binary-first", "binary-only", "mamba-only"}:
+            FreeFlowUtils.log(
+                f"Invalid {COLMAP_STRATEGY_ENV}='{raw}', using 'binary-first'",
+                "WARN",
+            )
+            return "binary-first"
+        return strategy
+
+    @staticmethod
+    def _get_colmap_env_path():
+        return FreeFlowUtils.get_extension_dir() / ".colmap_env"
+
+    @staticmethod
+    def _get_mamba_root_path():
+        return FreeFlowUtils.get_extension_dir() / ".mamba"
+
+    @staticmethod
+    def _get_micromamba_path():
+        exe = "micromamba.exe" if FreeFlowUtils.get_os() == "Windows" else "micromamba"
+        return FreeFlowUtils.get_bin_dir() / exe
+
+    @staticmethod
+    def _run_subprocess_with_env(cmd, cwd=None, env=None):
+        import subprocess
+
+        try:
+            result = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+            return result.returncode, result.stdout, result.stderr
+        except Exception as e:
+            return 1, "", str(e)
+
+    @staticmethod
+    def _find_colmap_linux_asset_url(version):
+        """
+        Look for official Linux binary assets. Returns URL or None.
+        Currently COLMAP publishes Windows binaries, but this keeps support
+        forward-compatible if Linux assets are added later.
+        """
+        import json
+
+        normalized = (version or COLMAP_DEFAULT_VERSION).lstrip("v")
+        tag_urls = [
+            f"https://api.github.com/repos/{COLMAP_REPO}/releases/tags/{normalized}",
+            f"https://api.github.com/repos/{COLMAP_REPO}/releases/tags/v{normalized}",
+            f"https://api.github.com/repos/{COLMAP_REPO}/releases/latest",
+        ]
+
+        for api_url in tag_urls:
+            try:
+                with FreeFlowUtils._urlopen_with_ssl_fallback(
+                    api_url,
+                    headers={"User-Agent": "FreeFlow-Colmap-Installer"},
+                    timeout=4,
+                ) as response:
+                    if response.status != 200:
+                        continue
+                    data = json.loads(response.read())
+            except Exception:
+                continue
+
+            for asset in data.get("assets", []):
+                name = (asset.get("name") or "").lower()
+                if not name or name.endswith(".sha256"):
+                    continue
+
+                looks_linux = any(token in name for token in ("linux", "ubuntu", "appimage"))
+                looks_colmap = "colmap" in name
+                if looks_linux and looks_colmap:
+                    return asset.get("browser_download_url")
+
+        return None
+
+    @staticmethod
+    def _find_colmap_candidate_in_dir(search_dir):
+        if not search_dir.exists():
+            return None
+
+        candidates = []
+        for pattern in ("colmap", "COLMAP", "*.AppImage"):
+            for item in search_dir.rglob(pattern):
+                if item.is_file():
+                    lower = item.name.lower()
+                    if lower.endswith((".sha256", ".txt", ".json", ".md")):
+                        continue
+                    candidates.append(item)
+
+        if not candidates:
+            return None
+
+        def _rank(path_obj):
+            lower = path_obj.name.lower()
+            if lower == "colmap":
+                return 0
+            if lower.endswith(".appimage"):
+                return 1
+            return 2
+
+        candidates.sort(key=_rank)
+        return candidates[0]
+
+    @staticmethod
+    def _install_colmap_linux_binary(version=COLMAP_DEFAULT_VERSION):
+        """
+        Try Linux binary install in this order:
+        1) FREEFLOW_COLMAP_LINUX_LOCAL_ARCHIVE local file path
+        2) FREEFLOW_COLMAP_LINUX_URL
+        3) Official release Linux asset (if ever provided upstream)
+        """
+        if FreeFlowUtils.get_os() != "Linux":
+            return False
+
+        from urllib.parse import urlparse, unquote
 
         bin_dir = FreeFlowUtils.get_bin_dir()
         bin_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Dynamic URL
-        url = f"https://github.com/colmap/colmap/releases/download/{version}/colmap-x64-windows-cuda.zip"
-        archive_path = bin_dir / "colmap.zip"
-        
-        FreeFlowUtils.log(f"Installing COLMAP {version}...")
-        
-        if FreeFlowUtils.download_file(url, archive_path):
-            if FreeFlowUtils.extract_archive(archive_path, bin_dir):
-                try: archive_path.unlink()
-                except: pass
-                # Windows COLMAP zip extracts to a folder named "COLMAP-3.10-windows-cuda" or similar
-                # We need to find it and maybe flatten it or update logic?
-                # Actually, simplest is to let it sit there and find it dynamically.
-                
-                FreeFlowUtils.save_local_version("colmap", version)
-                return True
+
+        source_path = None
+        downloaded_temp = False
+
+        local_archive = os.environ.get(COLMAP_LINUX_LOCAL_ARCHIVE_ENV)
+        if local_archive:
+            candidate = Path(local_archive).expanduser()
+            if candidate.exists() and candidate.is_file():
+                source_path = candidate
+                FreeFlowUtils.log(f"Using local Linux COLMAP source: {source_path}")
+            else:
+                FreeFlowUtils.log(
+                    f"{COLMAP_LINUX_LOCAL_ARCHIVE_ENV} set but file not found: {candidate}",
+                    "WARN",
+                )
+
+        if source_path is None:
+            custom_url = os.environ.get(COLMAP_LINUX_URL_ENV)
+            source_url = custom_url or FreeFlowUtils._find_colmap_linux_asset_url(version)
+
+            if not source_url:
+                FreeFlowUtils.log(
+                    "No Linux COLMAP binary URL found (set FREEFLOW_COLMAP_LINUX_URL for custom binary/archive)",
+                    "WARN",
+                )
+                return False
+
+            filename = Path(unquote(urlparse(source_url).path)).name or "colmap-linux-download"
+            source_path = bin_dir / f"_tmp_{filename}"
+
+            FreeFlowUtils.log(f"Downloading Linux COLMAP binary source from {source_url}...")
+            if not FreeFlowUtils.download_file(source_url, source_path):
+                return False
+            downloaded_temp = True
+
+        target_bin = bin_dir / "colmap"
+        extract_dir = bin_dir / "_colmap_extract_tmp"
+
+        try:
+            source_lower = source_path.name.lower()
+            is_archive = source_lower.endswith((".zip", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar"))
+
+            if is_archive:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir, ignore_errors=True)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+
+                if not FreeFlowUtils.extract_archive(source_path, extract_dir):
+                    return False
+
+                found = FreeFlowUtils._find_colmap_candidate_in_dir(extract_dir)
+                if not found:
+                    FreeFlowUtils.log("Linux COLMAP archive extracted but no executable was found", "ERROR")
+                    return False
+                source_binary = found
+            else:
+                source_binary = source_path
+
+            same_file = False
+            try:
+                same_file = source_binary.resolve() == target_bin.resolve()
+            except Exception:
+                same_file = False
+
+            if not same_file:
+                if target_bin.exists():
+                    try:
+                        target_bin.unlink()
+                    except Exception:
+                        pass
+
+                shutil.copy2(source_binary, target_bin)
+
+            FreeFlowUtils.ensure_executable(target_bin)
+
+            if not target_bin.exists():
+                FreeFlowUtils.log("COLMAP binary installation failed: target missing after copy", "ERROR")
+                return False
+
+            FreeFlowUtils.save_local_version("colmap", f"{version}-linux-binary")
+            FreeFlowUtils.log(f"COLMAP installed locally at {target_bin}")
+            return True
+        finally:
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            if downloaded_temp and source_path and source_path.exists():
+                try:
+                    source_path.unlink()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _install_micromamba_local():
+        if FreeFlowUtils.get_os() != "Linux":
+            return False
+
+        bin_dir = FreeFlowUtils.get_bin_dir()
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        micromamba_path = FreeFlowUtils._get_micromamba_path()
+        if micromamba_path.exists():
+            FreeFlowUtils.ensure_executable(micromamba_path)
+            return True
+
+        machine = platform.machine().lower()
+        if machine in ("x86_64", "amd64"):
+            url = MICROMAMBA_LINUX_X64_URL
+        elif machine in ("aarch64", "arm64"):
+            url = MICROMAMBA_LINUX_AARCH64_URL
+        else:
+            FreeFlowUtils.log(f"Unsupported Linux architecture for micromamba bootstrap: {machine}", "WARN")
+            return False
+
+        temp_path = micromamba_path.with_suffix(".tmp")
+        FreeFlowUtils.log(f"Installing local micromamba ({machine})...")
+        if not FreeFlowUtils.download_file(url, temp_path):
+            return False
+
+        if micromamba_path.exists():
+            try:
+                micromamba_path.unlink()
+            except Exception:
+                pass
+
+        shutil.move(str(temp_path), str(micromamba_path))
+        FreeFlowUtils.ensure_executable(micromamba_path)
+        return micromamba_path.exists()
+
+    @staticmethod
+    def _install_colmap_linux_mamba(version=COLMAP_DEFAULT_VERSION):
+        if FreeFlowUtils.get_os() != "Linux":
+            return False
+
+        env_path = FreeFlowUtils._get_colmap_env_path()
+        target_bin = env_path / "bin" / "colmap"
+        if target_bin.exists():
+            FreeFlowUtils.ensure_executable(target_bin)
+            return True
+
+        if not FreeFlowUtils._install_micromamba_local():
+            return False
+
+        micromamba = FreeFlowUtils._get_micromamba_path()
+        mamba_root = FreeFlowUtils._get_mamba_root_path()
+        mamba_root.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env["MAMBA_ROOT_PREFIX"] = str(mamba_root)
+        env["MAMBA_NO_BANNER"] = "1"
+
+        FreeFlowUtils.log("Installing COLMAP via project-local micromamba env (.colmap_env)...")
+        cmd_create = [
+            str(micromamba),
+            "create",
+            "-y",
+            "-p",
+            str(env_path),
+            "-c",
+            "conda-forge",
+            "colmap",
+        ]
+        rc, stdout, stderr = FreeFlowUtils._run_subprocess_with_env(
+            cmd_create,
+            cwd=str(FreeFlowUtils.get_extension_dir()),
+            env=env,
+        )
+
+        if rc != 0:
+            # If environment exists but create failed, try install into prefix.
+            cmd_install = [
+                str(micromamba),
+                "install",
+                "-y",
+                "-p",
+                str(env_path),
+                "-c",
+                "conda-forge",
+                "colmap",
+            ]
+            rc, stdout, stderr = FreeFlowUtils._run_subprocess_with_env(
+                cmd_install,
+                cwd=str(FreeFlowUtils.get_extension_dir()),
+                env=env,
+            )
+
+        if rc != 0:
+            FreeFlowUtils.log("COLMAP micromamba install failed", "ERROR")
+            if stderr:
+                FreeFlowUtils.log(stderr[-1000:], "ERROR")
+            return False
+
+        if not target_bin.exists():
+            FreeFlowUtils.log("COLMAP install finished but binary not found in .colmap_env/bin", "ERROR")
+            return False
+
+        FreeFlowUtils.ensure_executable(target_bin)
+        FreeFlowUtils.save_local_version("colmap", f"{version}-linux-mamba")
+        FreeFlowUtils.log(f"COLMAP installed locally at {target_bin}")
+        return True
+
+    @staticmethod
+    def install_colmap(version=COLMAP_DEFAULT_VERSION):
+        system = FreeFlowUtils.get_os()
+
+        if system == "Windows":
+            bin_dir = FreeFlowUtils.get_bin_dir()
+            bin_dir.mkdir(parents=True, exist_ok=True)
+
+            # Dynamic URL
+            url = f"https://github.com/colmap/colmap/releases/download/{version}/colmap-x64-windows-cuda.zip"
+            archive_path = bin_dir / "colmap.zip"
+
+            FreeFlowUtils.log(f"Installing COLMAP {version}...")
+
+            if FreeFlowUtils.download_file(url, archive_path):
+                if FreeFlowUtils.extract_archive(archive_path, bin_dir):
+                    try:
+                        archive_path.unlink()
+                    except Exception:
+                        pass
+
+                    FreeFlowUtils.save_local_version("colmap", version)
+                    return True
+            return False
+
+        if system == "Linux":
+            strategy = FreeFlowUtils._get_colmap_install_strategy()
+            FreeFlowUtils.log(
+                f"Linux COLMAP install strategy: {strategy} (all local to extension directory)"
+            )
+
+            if strategy in {"binary-first", "binary-only"}:
+                if FreeFlowUtils._install_colmap_linux_binary(version):
+                    return True
+                if strategy == "binary-only":
+                    return False
+
+            return FreeFlowUtils._install_colmap_linux_mamba(version)
+
+        FreeFlowUtils.log(
+            "Auto-Installation of COLMAP is currently supported on Windows and Linux.",
+            "WARN",
+        )
         return False
 
     @staticmethod
@@ -528,8 +883,9 @@ class FreeFlowUtils:
             print(f"   • 🌊 Update Found: Brush ({brush_ver} -> {latest_brush}). Auto-Updating...")
             FreeFlowUtils.install_brush(latest_brush)
         
-        # 2. CHECK COLMAP (Windows Only)
-        if FreeFlowUtils.get_os() == "Windows":
+        # 2. CHECK COLMAP
+        os_name = FreeFlowUtils.get_os()
+        if os_name == "Windows":
             colmap_ver = FreeFlowUtils.get_local_version("colmap")
             if not colmap_ver: colmap_ver = "Unknown"
             
@@ -543,6 +899,15 @@ class FreeFlowUtils:
             elif latest_colmap and colmap_ver != latest_colmap:
                  print(f"   • 🌊 Update Found: COLMAP ({colmap_ver} -> {latest_colmap}). Auto-Updating...")
                  FreeFlowUtils.install_colmap(latest_colmap)
+        elif os_name == "Linux":
+            if not FreeFlowUtils.get_binary_path("colmap"):
+                print("   • COLMAP binary missing. Auto-Installing (local + isolated)...")
+                target_colmap_ver = FreeFlowUtils._fetch_github_version(COLMAP_REPO) or COLMAP_DEFAULT_VERSION
+                if not FreeFlowUtils.install_colmap(target_colmap_ver):
+                    FreeFlowUtils.log(
+                        "COLMAP auto-install failed. Set FREEFLOW_COLMAP_LINUX_URL to a Linux binary/archive or use FREEFLOW_COLMAP_INSTALL_STRATEGY=mamba-only",
+                        "WARN",
+                    )
 
         # Check FFmpeg
         if not FreeFlowUtils.get_binary_path("ffmpeg"):
@@ -767,16 +1132,32 @@ class FreeFlowUtils:
             return None
 
         elif binary_name == "colmap":
+            local_env_colmap = FreeFlowUtils._get_colmap_env_path() / ("Scripts/colmap.exe" if system == "Windows" else "bin/colmap")
+
             if system == "Windows":
-                # Check common locations first
-                path = bin_dir / "colmap.exe"
-                if path.exists(): return path
+                # Prefer local direct binary, then local isolated env.
+                possible_paths = [
+                    bin_dir / "colmap.exe",
+                    local_env_colmap,
+                ]
+                for path in possible_paths:
+                    if path.exists():
+                        return path
                 
                  # Check recursively (often inside COLMAP-3.10-windows-cuda folder)
                 for item in bin_dir.rglob("colmap.exe"):
                     return item
                     
             elif system == "Darwin":
+                # Prefer local isolated install first.
+                local_paths = [
+                    bin_dir / "colmap",
+                    local_env_colmap,
+                ]
+                for path in local_paths:
+                    if path.exists():
+                        return path
+
                 # Check brew install location (Apple Silicon)
                 path = Path("/opt/homebrew/bin/colmap")
                 if path.exists(): return path
@@ -785,28 +1166,38 @@ class FreeFlowUtils:
                 path = Path("/usr/local/bin/colmap")
                 if path.exists(): return path
                 
-                # Check absolute bin_dir
-                path = bin_dir / "colmap"
-                if path.exists(): return path
-                
                 # Check system path
-                if shutil.which("colmap"):
-                    return Path(shutil.which("colmap"))
-                 
+                which_colmap = shutil.which("colmap")
+                if which_colmap:
+                    return Path(which_colmap)
+                  
                 # Final check for .app bundle (if user installed GUI app manually)
                 path = Path("/Applications/COLMAP.app/Contents/MacOS/colmap")
                 if path.exists(): return path
             else:
-                 # linux
-                path = bin_dir / "colmap"
-                if path.exists(): return path
-                if shutil.which("colmap"):
-                    return Path(shutil.which("colmap"))
+                # Linux: prefer local extension installs.
+                local_paths = [
+                    bin_dir / "colmap",
+                    local_env_colmap,
+                ]
+                for path in local_paths:
+                    if path.exists():
+                        return path
+
+                for item in bin_dir.rglob("colmap"):
+                    if item.is_file():
+                        return item
+
+                # Fallback to system path for compatibility.
+                which_colmap = shutil.which("colmap")
+                if which_colmap:
+                    return Path(which_colmap)
 
         elif binary_name == "ffmpeg":
              # Try system ffmpeg first
-             if shutil.which("ffmpeg"):
-                 return Path(shutil.which("ffmpeg"))
+             which_ffmpeg = shutil.which("ffmpeg")
+             if which_ffmpeg:
+                 return Path(which_ffmpeg)
              # Fallback to local
              path = bin_dir / "ffmpeg"
              if path.exists(): return path

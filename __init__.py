@@ -67,6 +67,9 @@ try:
         FreeFlowUtils.log("COLMAP NOT FOUND.", "WARN")
         if FreeFlowUtils.get_os() == "Darwin":
             print("   >>> ACTION: Run 'brew install colmap' in Terminal (Auto-install not supported on Mac due to dylib dependencies)")
+        elif FreeFlowUtils.get_os() == "Linux":
+            print("   >>> ACTION: Linux auto-install is local to this extension. If needed set FREEFLOW_COLMAP_LINUX_URL or FREEFLOW_COLMAP_LINUX_LOCAL_ARCHIVE.")
+            print("   >>>         Optional strategy override: FREEFLOW_COLMAP_INSTALL_STRATEGY=binary-first|binary-only|mamba-only")
     else:
         print(f"   • COLMAP: Found ({colmap_path.name})")
 
