@@ -44,6 +44,7 @@ class SplatfactoEngine(IGSEngine):
         self.last_checkpoint_dir = None  # Stores checkpoint dir from last successful training
         self._browser_opened = False  # Track if browser was already opened (only open once per run)
         self._lpips_cache_attempted = False
+        self._max_gs_num_supported = None  # None = not yet checked, True/False = cached result
         
         try:
             from ..nerfstudio_env import NerfstudioEnvironment
@@ -145,6 +146,40 @@ class SplatfactoEngine(IGSEngine):
             run_env.setdefault("CURL_CA_BUNDLE", ca_bundle)
 
         return run_env
+
+    def _supports_max_gs_num(self) -> bool:
+        """Check if the installed splatfacto model config supports max_gs_num."""
+        if self._max_gs_num_supported is not None:
+            return self._max_gs_num_supported
+
+        if not self._env:
+            self._max_gs_num_supported = False
+            return False
+
+        venv_python = self._env.get_python()
+        if not venv_python:
+            self._max_gs_num_supported = False
+            return False
+
+        try:
+            import subprocess as sp
+            result = sp.run(
+                [str(venv_python), "-c",
+                 "from nerfstudio.models.splatfacto import SplatfactoModelConfig; "
+                 "print(hasattr(SplatfactoModelConfig(), 'max_gs_num'))"],
+                capture_output=True, text=True, timeout=30
+            )
+            supported = result.returncode == 0 and "True" in result.stdout
+            self._max_gs_num_supported = supported
+            if supported:
+                print("[SplatfactoEngine] max_gs_num: supported by installed nerfstudio")
+            else:
+                print("[SplatfactoEngine] max_gs_num: not supported by installed nerfstudio (skipping)")
+        except Exception as e:
+            print(f"[SplatfactoEngine] max_gs_num capability check failed ({e}), skipping")
+            self._max_gs_num_supported = False
+
+        return self._max_gs_num_supported
 
     def _ensure_lpips_alexnet_cached(self, run_env: Dict[str, str]) -> None:
         """Best-effort one-time pre-cache for LPIPS AlexNet weights."""
@@ -342,8 +377,6 @@ class SplatfactoEngine(IGSEngine):
         cmd.append(variant)
         
         # --- MODEL PARAMETERS (must come before data paths) ---
-        # Note: Only pass parameters that exist in all nerfstudio versions.
-        # max_gs_num was added in newer versions (MCMC support) — pass conditionally.
         cmd.extend([
             f"--pipeline.model.sh_degree={params.get('sh_degree', 3)}",
             f"--pipeline.model.cull_alpha_thresh={params.get('cull_alpha_thresh', 0.22)}",
@@ -357,6 +390,14 @@ class SplatfactoEngine(IGSEngine):
             f"--pipeline.model.sh_degree_interval={params.get('sh_degree_interval', 1000)}",
             f"--pipeline.model.background_color={params.get('background_color', 'black')}",
         ])
+        
+        # --- MAX GAUSSIAN CAP (version-dependent) ---
+        # max_gs_num was added in newer nerfstudio versions (MCMC support).
+        # Only append when the installed version supports it.
+        max_gs_num = params.get('max_gs_num')
+        if max_gs_num is not None and self._supports_max_gs_num():
+            cmd.append(f"--pipeline.model.max_gs_num={int(max_gs_num)}")
+            print(f"[SplatfactoEngine] Gaussian cap: max_gs_num={int(max_gs_num)}")
         
         # --- FIXED TOPOLOGY MODE ---
         is_fixed_topology = not params.get('continue_cull_post_densification', True)

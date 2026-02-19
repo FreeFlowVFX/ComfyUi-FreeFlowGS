@@ -1929,6 +1929,7 @@ class FreeFlow_GS_Engine:
                     'split_screen_size': kwargs.get('split_screen_size', 0.05),
                     'sh_degree_interval': kwargs.get('sh_degree_interval', 1000),
                     'background_color': kwargs.get('background_color', 'black'),
+                    'max_gs_num': kwargs.get('max_gs_num', 1000000),
                     'frame_idx': idx_seq,
                     'output_dir': output_dir / "nerfstudio_outputs",
                     'experiment_name': frame_name,
